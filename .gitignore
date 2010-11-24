@@ -1,2 +1,4 @@
 .*.swp
+*.pyc
+_*_temp
 env

@@ -1,10 +1,11 @@
-#!env/bin/python
-import sys
+from __future__ import absolute_import
 import random
 
 from twisted.internet.protocol import ClientFactory
 from twisted.protocols.basic import LineReceiver
 from twisted.internet import reactor
+
+from . utils import parse_ip, parse_ips
 
 
 # Special value to specify myself as master
@@ -16,7 +17,7 @@ class LockProtocol(LineReceiver):
 
 
     def connectionMade(self):
-        self.sendLine('hello %s %s' % self.factory.address)
+        self.sendLine('hello %s %s' % (self.factory.interface, self.factory.port))
 
 
     def connectionLost(self, reason):
@@ -125,14 +126,17 @@ class LockProtocol(LineReceiver):
 class LockFactory(ClientFactory):
     protocol = LockProtocol
 
-    def __init__(self, port, server_list):
+    def __init__(self, config):
+        interface, port = parse_ip(config.get('myself', 'listen'))
+        server_list = parse_ips(config.get('cluster', 'nodes'))
+
         self.port = port
-        self.address = ('localhost', port)
+        self.interface = interface
         self.master = None
         self.weight = None
 
         self.connections = dict((addr, None) for addr in server_list)
-        del self.connections[('localhost', self.port)]
+        del self.connections[(self.interface, self.port)]
 
     def startFactory(self):
         reactor.callLater(10, self._connect_to_others)
@@ -163,26 +167,6 @@ class LockFactory(ClientFactory):
 
     def clientConnectionFailed(self, connector, reason):
         print 'Connection failed. Reason:', reason
-
-
-
-def main(port, num_servers):
-    # Next lines are magic:
-    factory = LockFactory(
-        port,
-        [('localhost', 2000 + x) for x in xrange(num_servers)]
-    )
-    #factory.protocol = LockProtocol
-
-    # 8007 is the port you want to run under. Choose something >1024
-    reactor.listenTCP(port, factory)
-    reactor.run()
-
-
-if __name__ == '__main__':
-    port = int(sys.argv[1])
-    num_servers = int(sys.argv[2])
-    main(port, num_servers)
 
 
 
