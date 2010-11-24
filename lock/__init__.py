@@ -22,9 +22,8 @@ class LockProtocol(LineReceiver):
 
     def connectionLost(self, reason):
         print 'Connection to the %s:%s lost.' % self.other_side
+        self.factory.remove_connection(self.other_side)
 
-        if self.factory.master is None:
-            self._add_election_result('error')
 
 
     def lineReceived(self, line):
@@ -50,14 +49,9 @@ class LockProtocol(LineReceiver):
 
         port = int(port)
         addr = (host, port)
-        if self.factory.connections[addr] is None:
-            print 'Adding %s:%s to the connections list' % addr
-            self.factory.connections[addr] = self
-            self.other_side = addr
-            self._check_if_master_should_be_elected()
-        else:
-            print 'We already have connection with %s:%s' % addr
-            self.transport.loseConnection()
+        self.other_side = addr
+        self.factory.add_connection(addr, self)
+        self._check_if_master_should_be_elected()
 
 
     def _check_if_master_should_be_elected(self):
@@ -135,16 +129,39 @@ class LockFactory(ClientFactory):
         self.master = None
         self.weight = None
 
-        self.connections = dict((addr, None) for addr in server_list)
-        del self.connections[(self.interface, self.port)]
+        self.connections = {}
+        self.neighbours = [
+            conn for conn in server_list
+            if conn != (self.interface, self.port)
+        ]
+
+    def add_connection(self, addr, protocol):
+        old = self.connections.get(addr, None)
+
+        if old is not None:
+            print 'We already have connection with %s:%s' % addr
+            import pdb;pdb.set_trace()
+            protocol.transport.loseConnection()
+        else:
+            print 'Adding %s:%s to the connections list' % addr
+            self.connections[addr] = protocol
+
+
+    def remove_connection(self, addr):
+        del self.connections[addr]
+
 
     def startFactory(self):
-        reactor.callLater(10, self._connect_to_others)
+        reactor.callWhenRunning(self._reconnect)
 
-    def _connect_to_others(self):
-        for (host, port), connection in self.connections.items():
-            if connection is None:
+
+    def _reconnect(self):
+        for host, port in self.neighbours:
+            if (host, port) not in self.connections:
                 reactor.connectTCP(host, port, self)
+
+        reactor.callLater(5, self._reconnect)
+
 
     def startedConnecting(self, connector):
         print 'Started to connect to another server: %s:%s' % (
@@ -154,19 +171,17 @@ class LockFactory(ClientFactory):
 
 
     def buildProtocol(self, addr):
-        print 'Connected to another server: %s:%s' % (addr.host, addr.port)
+        conn = addr.host, addr.port
+        print 'Connected to another server: %s:%s' % conn
         return ClientFactory.buildProtocol(self, addr)
 
 
-    def clientConnectionLost(self, connector, reason):
-        print 'Lost connection to %s:%s. Reason: %s' % (
+    def clientConnectionFailed(self, connector, reason):
+        print 'Connection to %s:%s failed. Reason: %s' % (
             connector.host,
             connector.port,
             reason
         )
-
-    def clientConnectionFailed(self, connector, reason):
-        print 'Connection failed. Reason:', reason
 
 
 
