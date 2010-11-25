@@ -6,6 +6,7 @@ from twisted.protocols.basic import LineReceiver
 from twisted.internet import reactor
 
 from . utils import parse_ip, parse_ips
+from . exceptions import KeyAlreadyExists, KeyNotFound
 
 
 # Special value to specify myself as master
@@ -135,12 +136,34 @@ class LockFactory(ClientFactory):
             if conn != (self.interface, self.port)
         ]
 
+        # state
+        self._keys = {}
+
+
+    def get_key(self, key):
+        if key not in self._keys:
+            raise KeyNotFound('Key "%s" not found' % key)
+        return self._keys[key]
+
+
+    def set_key(self, key, value):
+        if key in self._keys:
+            raise KeyAlreadyExists('Key "%s" already exists' % key)
+
+        self._keys[key] = value
+
+
+    def del_key(self, key):
+        if key not in self._keys:
+            raise KeyNotFound('Key "%s" not found' % key)
+        return self._keys.pop(key)
+
+
     def add_connection(self, addr, protocol):
         old = self.connections.get(addr, None)
 
         if old is not None:
             print 'We already have connection with %s:%s' % addr
-            import pdb;pdb.set_trace()
             protocol.transport.loseConnection()
         else:
             print 'Adding %s:%s to the connections list' % addr
