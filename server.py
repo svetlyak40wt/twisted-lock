@@ -1,17 +1,21 @@
 #!env/bin/python
+# -*- coding: utf-8 -*-
 import sys
 
 from twisted.internet import reactor
 from twisted.web import server
-from lock import LockFactory
+from lock.lock import LockFactory
 from lock.web import Root
-from lock.utils import parse_ip
+from lock.utils import parse_ip, init_logging
 
 from ConfigParser import SafeConfigParser
+
 
 def main():
     config = SafeConfigParser()
     config.read(sys.argv[1])
+
+    init_logging()
 
     lock = LockFactory(config)
     web = server.Site(Root(lock))
