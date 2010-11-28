@@ -103,69 +103,6 @@ class LockProtocol(LineReceiver):
         addr = (host, port)
         self.other_side = addr
         self.factory.add_connection(addr, self)
-        self._check_if_master_should_be_elected()
-
-
-    def _check_if_master_should_be_elected(self):
-        if self.factory.master is None and \
-                all(self.factory.connections.values()):
-            self._start_master_election()
-
-
-    def _start_master_election(self):
-        self.factory.weight = random.randint(0, 100)
-        self.factory.election_results = {}
-
-        for addr, connection in self.factory.connections.items():
-            if connection is not None:
-                self.factory.election_results[addr] = None
-                connection.sendLine('master_election %d' % self.factory.weight)
-
-
-    def _add_election_result(self, result):
-        self.factory.election_results[self.other_side] = result
-        done = len(filter(lambda x: x is None, self.factory.election_results.values())) == 0
-        if done:
-            approved = len(filter(lambda x: x == 'approved', self.factory.election_results.values()))
-            if approved > len(self.factory.election_results) / 2:
-                self._set_master(ME)
-
-
-    def _set_master(self, master):
-        self.factory.master = master
-
-        if master == ME:
-            print 'Horay! I am the MASTER!'
-            for connection in self.factory.connections.values():
-                connection.sendLine('i_am_master')
-        else:
-            print 'New master was elected: %s:%s' % master.other_side
-
-        self.factory.election_results = None
-
-
-    def cmd_master_election(self, weight):
-        if self.factory.weight is None:
-            self._start_master_election()
-
-        if int(weight) > self.factory.weight:
-            #import pdb;pdb.set_trace()
-            result = self.sendLine('master_approve')
-        else:
-            #kimport pdb;pdb.set_trace()
-            result = self.sendLine('master_decline')
-
-
-    def cmd_master_approve(self):
-        self._add_election_result('approved')
-
-
-    def cmd_master_decline(self):
-        self._add_election_result('declined')
-
-
-    def cmd_i_am_master(self):
-        self._set_master(self)
 
 
 
@@ -179,7 +116,6 @@ class LockFactory(ClientFactory):
         self.port = port
         self.interface = interface
         self.master = None
-        self.weight = None
 
         self.connections = {}
         self.neighbours = [
@@ -202,6 +138,7 @@ class LockFactory(ClientFactory):
 
 
     def set_key(self, key, value):
+        d = Deferred()
         if key in self._keys:
             raise KeyAlreadyExists('Key "%s" already exists' % key)
 
