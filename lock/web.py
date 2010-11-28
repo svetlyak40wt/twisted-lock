@@ -76,7 +76,7 @@ class Root(resource.Resource):
     def render_POST(self, request):
         try:
             key = _get_key(request.path)
-            self.log.info('Adding a new key %s' % key)
+            self.log.info('Set key %s' % key)
             yield self._lock.set_key(key, '')
         except KeyAlreadyExists:
             request.setResponseCode(CONFLICT)
@@ -84,12 +84,15 @@ class Root(resource.Resource):
             request.setResponseCode(EXPECTATION_FAILED)
 
 
+    @delayed
     def render_DELETE(self, request):
         key = _get_key(request.path)
         try:
-            return self._lock.del_key(key)
+            self.log.info('Del key %s' % key)
+            yield self._lock.del_key(key)
         except KeyNotFound:
             request.setResponseCode(NOT_FOUND)
-        return ''
+        except PaxosFailed:
+            request.setResponseCode(EXPECTATION_FAILED)
 
 

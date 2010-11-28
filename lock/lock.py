@@ -12,7 +12,7 @@ from twisted.internet import reactor
 from twisted.internet.defer import Deferred
 from twisted.python import failure
 
-from . utils import parse_ip, parse_ips, trace_all
+from . utils import parse_ip, parse_ips, trace_all, escape
 from . exceptions import KeyAlreadyExists, KeyNotFound, PaxosFailed
 
 TIMEOUT = 5
@@ -71,7 +71,7 @@ class PaxosProposer(object):
         results = filter(None, self.results)
 
         if len(results) == 0 or self.value in results:
-            self.accept_requests = self.factory.broadcast('paxos-accept %s "%s"' % (self.number, self.value))
+            self.accept_requests = self.factory.broadcast('paxos-accept %s "%s"' % (self.number, escape(self.value)))
             self.accept_responses = 0
             self.factory.add_callback('paxos-accepted %s' % self.number, self.on_accepted)
             self.accept_timeout = reactor.callLater(5, self.fail)
@@ -107,13 +107,14 @@ class PaxosAcceptor(object):
         num = int(num)
         if num > self.max_seen_id:
             self.max_seen_id = num
-            client.sendLine('paxos-ack %s "%s"' % (num, self.values.get(num, '')))
+            client.sendLine('paxos-ack %s "%s"' % (num, escape(self.values.get(num, ''))))
         else:
             client.sendLine('paxos-nack %s' % num)
 
     def on_accept(self, num, value, client = None):
         self.values[int(num)] = value
         client.sendLine('paxos-accepted %s' % num)
+        self.factory.on_accept(value)
 
 
 class LockProtocol(LineReceiver):
@@ -178,6 +179,7 @@ class LockFactory(ClientFactory):
         ]
 
         # state
+        self._log = []
         self._keys = {}
         self._paxos_id = 0
         self.state = []
@@ -210,20 +212,25 @@ class LockFactory(ClientFactory):
         if key in self._keys:
             raise KeyAlreadyExists('Key "%s" already exists' % key)
 
-        self._paxos_id += 1
-        proposer = PaxosProposer(self, self._paxos_id, 'set-key %s "%s"' % (key, value))
+        value = 'set-key %s "%s"' % (key, escape(value))
+        return self._start_paxos(value)
 
-        def cb(result):
-            self._keys[key] = value
-        proposer.deferred.addCallback(cb)
 
+    def _start_paxos(self, value):
+        """ Start a new paxos iteration.
+        """
+        self.acceptor.max_seen_id += 1
+        proposer = PaxosProposer(self, self.acceptor.max_seen_id, value)
+        proposer.deferred.addCallback(self.on_accept)
         return proposer.deferred
 
 
     def del_key(self, key):
         if key not in self._keys:
             raise KeyNotFound('Key "%s" not found' % key)
-        return self._keys.pop(key)
+
+        value = 'del-key %s' % key
+        return self._start_paxos(value)
 
 
     def add_connection(self, addr, protocol):
@@ -279,7 +286,22 @@ class LockFactory(ClientFactory):
             connection.sendLine(line)
         return len(self.connections)
 
-trace_all(PaxosProposer)
+    def on_accept(self, value):
+        self._log.append(value)
+        splitted = shlex.split(value)
+        command = '_log_cmd_' + splitted[0].replace('-', '_')
+        cmd = getattr(self, command)
+        return cmd(*splitted[1:])
+
+    def _log_cmd_set_key(self, key, value):
+        self._keys[key] = value
+        return value
+
+    def _log_cmd_del_key(self, key):
+        return self._keys.pop(key)
+
+
+#trace_all(PaxosProposer)
 #trace_all(PaxosAcceptor)
 #trace_all(LockProtocol)
 #trace_all(LockFactory)

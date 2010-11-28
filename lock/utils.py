@@ -54,3 +54,4 @@ def trace_all(cls):
                 setattr(cls, key, trace(value))
     return cls
 
+escape = lambda x: x.replace('\\', '\\\\').replace('"', '\\"')
