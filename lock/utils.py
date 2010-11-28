@@ -1,6 +1,9 @@
 import os
 import twisted
 import logging
+import types
+
+from functools import wraps
 
 def parse_ip(text):
     text = text.strip()
@@ -30,4 +33,24 @@ def init_logging():
     )
     observer = twisted.python.log.PythonLoggingObserver()
     twisted.python.log.startLoggingWithObserver(observer.emit)
+
+
+def trace(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        log = logging.getLogger('trace')
+        log.info('Calling %s(args = %r, kwargs = %r)' % (
+            func.__name__, args, kwargs
+        ))
+        return func(*args, **kwargs)
+    return wrapper
+
+
+def trace_all(cls):
+    for key in dir(cls):
+        if not key.startswith('__') or key == '__init__':
+            value = getattr(cls, key)
+            if isinstance(value, (types.MethodType, types.FunctionType)):
+                setattr(cls, key, trace(value))
+    return cls
 

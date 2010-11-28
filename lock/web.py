@@ -1,18 +1,21 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
 
+import logging
+
 from time import time
 from functools import wraps
 
 from twisted.web import resource
-from twisted.web.http import CONFLICT, NOT_FOUND
+from twisted.web.http import CONFLICT, NOT_FOUND, INTERNAL_SERVER_ERROR, EXPECTATION_FAILED
 from twisted.web.server import NOT_DONE_YET
 from twisted.internet.task import deferLater
 from twisted.internet import reactor
-from twisted.internet.defer import CancelledError, inlineCallbacks
+from twisted.internet.defer import inlineCallbacks
 from twisted.python.log import err
+from twisted.python.failure import Failure
 
-from . exceptions import KeyAlreadyExists, KeyNotFound
+from . exceptions import KeyAlreadyExists, KeyNotFound, PaxosFailed
 
 def _get_key(path):
     return path[1:]
@@ -37,6 +40,10 @@ def delayed(func):
         request.notifyFinish().addErrback(on_cancel)
 
         def finish_request(result):
+            if isinstance(result, Failure):
+                request.setResponseCode(INTERNAL_SERVER_ERROR)
+                err(result, 'during request to "%s"' % request.path)
+
             if finished[0] == False:
                 request.finish()
 
@@ -51,6 +58,7 @@ class Root(resource.Resource):
 
     def __init__(self, lock):
         self._lock = lock
+        self.log = logging.getLogger('web')
         resource.Resource.__init__(self)
 
 
@@ -68,9 +76,12 @@ class Root(resource.Resource):
     def render_POST(self, request):
         try:
             key = _get_key(request.path)
+            self.log.info('Adding a new key %s' % key)
             yield self._lock.set_key(key, '')
         except KeyAlreadyExists:
             request.setResponseCode(CONFLICT)
+        except PaxosFailed:
+            request.setResponseCode(EXPECTATION_FAILED)
 
 
     def render_DELETE(self, request):

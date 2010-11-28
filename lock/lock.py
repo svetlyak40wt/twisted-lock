@@ -1,15 +1,19 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
-import random
+
+import re
+import logging
+import shlex
 
 from math import ceil
 from twisted.internet.protocol import ClientFactory
 from twisted.protocols.basic import LineReceiver
 from twisted.internet import reactor
 from twisted.internet.defer import Deferred
+from twisted.python import failure
 
-from . utils import parse_ip, parse_ips
-from . exceptions import KeyAlreadyExists, KeyNotFound
+from . utils import parse_ip, parse_ips, trace_all
+from . exceptions import KeyAlreadyExists, KeyNotFound, PaxosFailed
 
 TIMEOUT = 5
 
@@ -19,9 +23,11 @@ class ME: pass
 
 class PaxosProposer(object):
     def __init__(self, factory, number, value):
+        self.log = logging.getLogger('paxos.proposer')
         self.deferred = Deferred()
         self.number = number
         self.value = value
+        self.factory = factory
 
         self.requests_count = factory.broadcast('paxos-prepare %s' % self.number)
         self.responses_count = 0
@@ -29,19 +35,18 @@ class PaxosProposer(object):
         self.state = 'waiting-promices'
         self.results = []
 
-        self.factory.add_callback('paxos-ack %s.*' % self.number, self.on_ack)
-        self.factory.add_callback('paxos-nack %s.*' % self.number, self.on_nack)
-        self.timeout = reactor.callLater(5, self.end_prepare)
+        factory.add_callback('paxos-ack %s.*' % self.number, self.on_ack)
+        factory.add_callback('paxos-nack %s' % self.number, self.on_nack)
+        self.prepare_timeout = reactor.callLater(5, self.end_prepare)
 
-    def on_ack(self, line):
-        value = line.replace('paxos-ack %s' % self.number, '').strip()
+    def on_ack(self, number, value, client = None):
         self.results.append(value)
         self.responses_count += 1
 
         if self.responses_count == self.requests_count:
             self.end_prepare()
 
-    def on_nack(self, line):
+    def on_nack(self, number, client = None):
         self.responses_count += 1
 
         if self.responses_count == self.requests_count:
@@ -50,17 +55,65 @@ class PaxosProposer(object):
     def end_prepare(self):
         self.factory.remove_callback(self.on_ack)
         self.factory.remove_callback(self.on_nack)
-        self.timeout.cancel()
+        if not self.prepare_timeout.cancelled:
+            self.prepare_timeout.cancel()
 
-        if len(self.results) > ceil(self.requests_count / 2.0):
+        num_results = len(self.results)
+        threshold = ceil(self.requests_count / 2.0)
+
+        if num_results > threshold:
             self.send_accept()
-
+        else:
+            self.log.error('Too small acks received: %s < %s' % (num_results, threshold))
+            self.fail()
 
     def send_accept(self):
-        if self.value in self.results:
-            # TODO продолжить тут
-            value = random
+        results = filter(None, self.results)
 
+        if len(results) == 0 or self.value in results:
+            self.accept_requests = self.factory.broadcast('paxos-accept %s "%s"' % (self.number, self.value))
+            self.accept_responses = 0
+            self.factory.add_callback('paxos-accepted %s' % self.number, self.on_accepted)
+            self.accept_timeout = reactor.callLater(5, self.fail)
+        else:
+            self.log.error('No accepts was received or they are with some other values')
+            self.fail()
+
+    def on_accepted(self, number, client = None):
+        self.accept_responses += 1
+        threshold = ceil(self.accept_requests / 2.0)
+        if self.accept_responses >= threshold:
+            if not self.accept_timeout.cancelled:
+                self.accept_timeout.cancel()
+                self.deferred.callback(self.value)
+
+    def fail(self):
+        self.deferred.errback(failure.Failure(
+            PaxosFailed('Paxos iteration failed'))
+        )
+
+
+class PaxosAcceptor(object):
+    def __init__(self, factory):
+        self.factory = factory
+        self.max_seen_id = 0
+        self.log = logging.getLogger('paxos.acceptor')
+        self.values = {}
+
+        factory.add_callback('paxos-prepare .*', self.on_prepare)
+        factory.add_callback('paxos-accept .*', self.on_accept)
+
+    def on_prepare(self, num, client = None):
+        num = int(num)
+        if num > self.max_seen_id:
+            self.max_seen_id = num
+            client.sendLine('paxos-ack %s "%s"' % (num, self.values.get(num, '')))
+        else:
+            client.sendLine('paxos-nack %s' % num)
+
+    def on_accept(self, num, value, client = None):
+        self.values[int(num)] = value
+        client.sendLine('paxos-accepted %s' % num)
 
 
 class LockProtocol(LineReceiver):
@@ -77,18 +130,19 @@ class LockProtocol(LineReceiver):
         self.factory.remove_connection(self.other_side)
 
 
-
     def lineReceived(self, line):
         print 'RECV:', line
-        line = line.split()
-        command = line[0]
-        args = line[1:]
+        parsed = shlex.split(line)
+        command = parsed[0]
+        args = parsed[1:]
         try:
             cmd = getattr(self, 'cmd_' + command)
         except:
-            raise RuntimeError('Unknown command "%s"' % command)
+            cmd = self.factory.find_callback(line)
+            if cmd is None:
+                raise RuntimeError('Unknown command "%s"' % command)
 
-        cmd(*args)
+        cmd(client = self, *args)
 
 
     def sendLine(self, line):
@@ -96,7 +150,7 @@ class LockProtocol(LineReceiver):
         return LineReceiver.sendLine(self, line)
 
 
-    def cmd_hello(self, host, port):
+    def cmd_hello(self, host, port, client = None):
         print 'Received hello from %s:%s' % (host, port)
 
         port = int(port)
@@ -125,7 +179,22 @@ class LockFactory(ClientFactory):
 
         # state
         self._keys = {}
+        self._paxos_id = 0
+        self.state = []
+        self.callbacks = []
 
+        self.acceptor = PaxosAcceptor(self)
+
+    def add_callback(self, regex, callback):
+        self.callbacks.append((re.compile(regex), callback))
+
+    def remove_callback(self, callback):
+        self.callbacks = filter(lambda x: x[1] != callback, self.callbacks)
+
+    def find_callback(self, line):
+        for regex, callback in self.callbacks:
+            if regex.match(line) != None:
+                return callback
 
     def get_key(self, key):
         d = Deferred()
@@ -138,11 +207,17 @@ class LockFactory(ClientFactory):
 
 
     def set_key(self, key, value):
-        d = Deferred()
         if key in self._keys:
             raise KeyAlreadyExists('Key "%s" already exists' % key)
 
-        self._keys[key] = value
+        self._paxos_id += 1
+        proposer = PaxosProposer(self, self._paxos_id, 'set-key %s "%s"' % (key, value))
+
+        def cb(result):
+            self._keys[key] = value
+        proposer.deferred.addCallback(cb)
+
+        return proposer.deferred
 
 
     def del_key(self, key):
@@ -199,5 +274,13 @@ class LockFactory(ClientFactory):
         )
 
 
+    def broadcast(self, line):
+        for connection in self.connections.values():
+            connection.sendLine(line)
+        return len(self.connections)
 
-
+trace_all(PaxosProposer)
+#trace_all(PaxosAcceptor)
+#trace_all(LockProtocol)
+#trace_all(LockFactory)
+#
