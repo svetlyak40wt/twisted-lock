@@ -11,9 +11,17 @@ from twisted.protocols.basic import LineReceiver
 from twisted.internet import reactor
 from twisted.internet.defer import Deferred
 from twisted.python import failure
+from twisted.web import server
 
 from . utils import parse_ip, parse_ips, trace_all, escape
 from . exceptions import KeyAlreadyExists, KeyNotFound, PaxosFailed
+from . web import Root
+
+
+def stop_waiting(timeout):
+    if not (timeout.called or timeout.cancelled):
+        timeout.cancel()
+
 
 TIMEOUT = 5
 
@@ -55,8 +63,7 @@ class PaxosProposer(object):
     def end_prepare(self):
         self.factory.remove_callback(self.on_ack)
         self.factory.remove_callback(self.on_nack)
-        if not self.prepare_timeout.cancelled:
-            self.prepare_timeout.cancel()
+        stop_waiting(self.prepare_timeout)
 
         num_results = len(self.results)
         threshold = ceil(self.requests_count / 2.0)
@@ -165,8 +172,8 @@ class LockFactory(ClientFactory):
     protocol = LockProtocol
 
     def __init__(self, config):
-        interface, port = parse_ip(config.get('myself', 'listen'))
-        server_list = parse_ips(config.get('cluster', 'nodes'))
+        interface, port = parse_ip(config.get('myself', 'listen', '4001'))
+        server_list = parse_ips(config.get('cluster', 'nodes', '127.0.0.1:4001'))
 
         self.port = port
         self.interface = interface
@@ -186,6 +193,20 @@ class LockFactory(ClientFactory):
         self.callbacks = []
 
         self.acceptor = PaxosAcceptor(self)
+
+        self._port_listener = reactor.listenTCP(self.port, self, interface = self.interface)
+
+        self.web_server = server.Site(Root(self))
+
+        interface, port = parse_ip(config.get('web', 'listen', '9001'))
+        self._webport_listener = reactor.listenTCP(port, self.web_server, interface = interface)
+
+
+    def close(self):
+        self._port_listener.stopListening()
+        self._webport_listener.stopListening()
+        stop_waiting(self._delayed_reconnect)
+
 
     def add_callback(self, regex, callback):
         self.callbacks.append((re.compile(regex), callback))
@@ -257,7 +278,7 @@ class LockFactory(ClientFactory):
             if (host, port) not in self.connections:
                 reactor.connectTCP(host, port, self)
 
-        reactor.callLater(5, self._reconnect)
+        self._delayed_reconnect = reactor.callLater(5, self._reconnect)
 
 
     def startedConnecting(self, connector):
@@ -301,8 +322,8 @@ class LockFactory(ClientFactory):
         return self._keys.pop(key)
 
 
-#trace_all(PaxosProposer)
-#trace_all(PaxosAcceptor)
-#trace_all(LockProtocol)
-#trace_all(LockFactory)
-#
+trace_all(PaxosProposer)
+trace_all(PaxosAcceptor)
+trace_all(LockProtocol)
+trace_all(LockFactory)
+
