@@ -1,13 +1,15 @@
 from __future__ import absolute_import
 
+import re
+
 from twisted.trial import unittest
 from twisted.web.client import Agent
 from twisted.internet import reactor
 from twisted.internet.defer import inlineCallbacks, gatherResults
-from twisted.web.http import EXPECTATION_FAILED
+from twisted.web.http import EXPECTATION_FAILED, OK
 from StringIO import StringIO
 
-from .. lock import LockFactory
+from .. lock import LockFactory, LockProtocol
 from .. config import Config
 from .. utils import init_logging
 
@@ -64,6 +66,8 @@ listen = 9003
         super(Complex, self).__init__(*args, **kwargs)
 
     def setUp(self):
+        LockProtocol.send_line_hooks = []
+
         self.s1 = LockFactory(self.cfg1)
         self.s2 = LockFactory(self.cfg2)
         self.s3 = LockFactory(self.cfg3)
@@ -102,4 +106,57 @@ listen = 9003
         )
         for s in self.servers:
             self.assertEqual({'blah': ''}, s._keys)
+
+
+    @inlineCallbacks
+    def test_data_deletion_replicated_too(self):
+        yield self.wait_when_connection_establied()
+
+        result = yield self.client.request(
+            'POST',
+            'http://%s:%s/blah' % (self.s1.http_interface, self.s1.http_port)
+        )
+        for s in self.servers:
+            self.assertEqual({'blah': ''}, s._keys)
+
+        result = yield self.client.request(
+            'DELETE',
+            'http://%s:%s/blah' % (self.s1.http_interface, self.s1.http_port)
+        )
+        for s in self.servers:
+            self.assertEqual({}, s._keys)
+            self.assertEqual(
+                ['set-key blah ""', 'del-key blah'],
+                s._log
+            )
+
+
+    @inlineCallbacks
+    def test_connection_lost_during_prepare(self):
+        yield self.wait_when_connection_establied()
+
+        def drop_connection(conn, line):
+            if conn.other_side[1] == self.s3.port:
+                LockProtocol.send_line_hooks = []
+                conn.transport.loseConnection()
+
+        LockProtocol.send_line_hooks.append((
+            re.compile('^paxos-prepare 1$'), drop_connection))
+
+        result = yield self.client.request(
+            'POST',
+            'http://%s:%s/blah' % (self.s1.http_interface, self.s1.http_port)
+        )
+        self.assertEqual(EXPECTATION_FAILED, result.code)
+
+        # retry
+        result = yield self.client.request(
+            'POST',
+            'http://%s:%s/blah' % (self.s1.http_interface, self.s1.http_port)
+        )
+        self.assertEqual(OK, result.code)
+
+        for s in self.servers:
+            self.assertEqual({'blah': ''}, s._keys)
+
 

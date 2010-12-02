@@ -125,6 +125,13 @@ class PaxosAcceptor(object):
 
 
 class LockProtocol(LineReceiver):
+    # these hooks are for the functional
+    # testing of the protocol
+    # this list should contain tuples (regex, callback)
+    # if regex matches the received line, then callback will
+    # be called with (self, line) arguments.
+    send_line_hooks = []
+
     def __init__(self):
         self.other_side = (None, None)
         self._log = None
@@ -161,6 +168,11 @@ class LockProtocol(LineReceiver):
 
     def sendLine(self, line):
         self.log.info('SEND: ' + line)
+
+        for regex, callback in self.send_line_hooks:
+            if regex.match(line) is not None:
+                callback(self, line)
+
         return LineReceiver.sendLine(self, line)
 
 
