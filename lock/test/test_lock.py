@@ -64,32 +64,42 @@ listen = 9003
         super(Complex, self).__init__(*args, **kwargs)
 
     def setUp(self):
-        self.server1 = LockFactory(self.cfg1)
-        self.server2 = LockFactory(self.cfg2)
-        self.server3 = LockFactory(self.cfg3)
+        self.s1 = LockFactory(self.cfg1)
+        self.s2 = LockFactory(self.cfg2)
+        self.s3 = LockFactory(self.cfg3)
+        self.servers = [self.s1, self.s2, self.s3]
 
-        self.addCleanup(self.server1.close)
-        self.addCleanup(self.server2.close)
-        self.addCleanup(self.server3.close)
-
+        for s in self.servers:
+            self.addCleanup(s.close)
 
     @inlineCallbacks
     def wait_when_connection_establied(self):
-        yield gatherResults([
-            self.server1.when_connected(),
-            self.server2.when_connected(),
-            self.server3.when_connected(),
-        ])
+        yield gatherResults([s.when_connected() for s in self.servers])
 
 
     @inlineCallbacks
     def test_node_become_a_master(self):
         yield self.wait_when_connection_establied()
-        server = self.server1
+        server = self.s1
         self.assertEqual(None, server.master)
         result = yield self.client.request(
             'POST',
             'http://%s:%s/blah' % (server.http_interface, server.http_port)
         )
         self.assertEqual((server.interface, server.port), server.master)
+
+
+    @inlineCallbacks
+    def test_data_replicated_to_all_nodes(self):
+        yield self.wait_when_connection_establied()
+
+        for s in self.servers:
+            self.assertEqual({}, s._keys)
+
+        result = yield self.client.request(
+            'POST',
+            'http://%s:%s/blah' % (self.s1.http_interface, self.s1.http_port)
+        )
+        for s in self.servers:
+            self.assertEqual({'blah': ''}, s._keys)
 
