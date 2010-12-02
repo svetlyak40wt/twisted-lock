@@ -50,6 +50,24 @@ listen = 9003
 
         super(Blah, self).__init__(*args, **kwargs)
 
+    def setUp(self):
+        selfserver1 = LockFactory(self.cfg1)
+        selfserver2 = LockFactory(self.cfg2)
+        selfserver3 = LockFactory(self.cfg3)
+
+        self.addCleanup(self.server1.close)
+        self.addCleanup(self.server2.close)
+        self.addCleanup(self.server3.close)
+
+
+    @inlineCallbacks
+    def wait_when_connection_establied(self):
+        yield gatherResults([
+            self.server1.when_connected(),
+            self.server2.when_connected(),
+            self.server3.when_connected(),
+        ])
+
 
     @inlineCallbacks
     def test_start_server(self):
@@ -62,20 +80,12 @@ listen = 9003
 
     @inlineCallbacks
     def test_node_become_a_master(self):
-        server1 = LockFactory(self.cfg1)
-        server2 = LockFactory(self.cfg2)
-        server3 = LockFactory(self.cfg3)
-
-        self.addCleanup(server1.close)
-        self.addCleanup(server2.close)
-        self.addCleanup(server3.close)
-
-        yield gatherResults([
-            server1.when_connected(),
-            server2.when_connected(),
-            server3.when_connected(),
-        ])
-        self.assertEqual(None, server1.master)
-        result = yield self.client.request('POST', 'http://127.0.0.1:9001/blah')
-        self.assertEqual((server1.interface, server1.port), server1.master)
+        yield self.wait_when_connection_establied()
+        server = self.server1
+        self.assertEqual(None, server.master)
+        result = yield self.client.request(
+            'POST',
+            'http://%s:%s/blah' % (server.http_interface, server.http_port)
+        )
+        self.assertEqual((server.interface, server.port), server.master)
 

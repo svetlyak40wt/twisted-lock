@@ -210,8 +210,12 @@ class LockFactory(ClientFactory):
 
         self.web_server = server.Site(Root(self))
 
-        interface, port = parse_ip(config.get('web', 'listen', '9001'))
-        self._webport_listener = reactor.listenTCP(port, self.web_server, interface = interface)
+        self.http_interface, self.http_port = parse_ip(config.get('web', 'listen', '9001'))
+        self._webport_listener = reactor.listenTCP(
+            self.http_port,
+            self.web_server,
+            interface = self.http_interface,
+        )
 
 
     def close(self):
