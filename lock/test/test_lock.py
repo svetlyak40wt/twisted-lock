@@ -1,7 +1,5 @@
 from __future__ import absolute_import
 
-import gc
-
 from twisted.trial import unittest
 from twisted.web.client import Agent
 from twisted.internet import reactor
@@ -18,11 +16,26 @@ def cfg(text):
     config.readfp(StringIO(text))
     return config
 
-class Blah(unittest.TestCase):
-    def __init__(self, *args, **kwargs):
-        self.client = Agent(reactor)
-        init_logging()
 
+class TestCase(unittest.TestCase):
+    def __init__(self, *args, **kwargs):
+        init_logging()
+        self.client = Agent(reactor)
+        super(TestCase, self).__init__(*args, **kwargs)
+
+
+class Simple(TestCase):
+    @inlineCallbacks
+    def test_start_server(self):
+        server = LockFactory(cfg(''))
+        self.addCleanup(server.close)
+
+        result = yield self.client.request('POST', 'http://127.0.0.1:9001/blah')
+        self.assertEqual(EXPECTATION_FAILED, result.code)
+
+
+class Complex(TestCase):
+    def __init__(self, *args, **kwargs):
         self.cfg1 = cfg('''
 [cluster]
 nodes = 127.0.0.1:4001, 127.0.0.1:4002, 127.0.0.1:4003
@@ -48,12 +61,12 @@ listen = 4003
 listen = 9003
         ''')
 
-        super(Blah, self).__init__(*args, **kwargs)
+        super(Complex, self).__init__(*args, **kwargs)
 
     def setUp(self):
-        selfserver1 = LockFactory(self.cfg1)
-        selfserver2 = LockFactory(self.cfg2)
-        selfserver3 = LockFactory(self.cfg3)
+        self.server1 = LockFactory(self.cfg1)
+        self.server2 = LockFactory(self.cfg2)
+        self.server3 = LockFactory(self.cfg3)
 
         self.addCleanup(self.server1.close)
         self.addCleanup(self.server2.close)
@@ -67,15 +80,6 @@ listen = 9003
             self.server2.when_connected(),
             self.server3.when_connected(),
         ])
-
-
-    @inlineCallbacks
-    def test_start_server(self):
-        server = LockFactory(cfg(''))
-        self.addCleanup(server.close)
-
-        result = yield self.client.request('POST', 'http://127.0.0.1:9001/blah')
-        self.assertEqual(EXPECTATION_FAILED, result.code)
 
 
     @inlineCallbacks

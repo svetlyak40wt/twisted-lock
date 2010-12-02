@@ -207,6 +207,7 @@ class LockFactory(ClientFactory):
         self.acceptor = PaxosAcceptor(self)
 
         self._port_listener = reactor.listenTCP(self.port, self, interface = self.interface)
+        self._delayed_reconnect = None
 
         self.web_server = server.Site(Root(self))
 
@@ -221,7 +222,8 @@ class LockFactory(ClientFactory):
     def close(self):
         self._port_listener.stopListening()
         self._webport_listener.stopListening()
-        stop_waiting(self._delayed_reconnect)
+        if self._delayed_reconnect is not None:
+            stop_waiting(self._delayed_reconnect)
 
         for conn in self._all_connections:
             if conn.connected:
