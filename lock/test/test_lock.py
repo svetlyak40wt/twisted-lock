@@ -37,44 +37,38 @@ class Simple(TestCase):
 
 
 class Complex(TestCase):
+    num_nodes = 3
+
     def __init__(self, *args, **kwargs):
-        self.cfg1 = cfg('''
+        base_cfg = '''
 [cluster]
-nodes = 127.0.0.1:4001, 127.0.0.1:4002, 127.0.0.1:4003
+nodes = %s
 [myself]
-listen = 4001
+listen = %s
 [web]
-listen = 9001
-        ''')
-        self.cfg2 = cfg('''
-[cluster]
-nodes = 127.0.0.1:4001, 127.0.0.1:4002, 127.0.0.1:4003
-[myself]
-listen = 4002
-[web]
-listen = 9002
-        ''')
-        self.cfg3 = cfg('''
-[cluster]
-nodes = 127.0.0.1:4001, 127.0.0.1:4002, 127.0.0.1:4003
-[myself]
-listen = 4003
-[web]
-listen = 9003
-        ''')
+listen = %s
+'''
+        nodes = ', '.join(
+            '127.0.0.1:%s' % (4001 + x)
+            for x in range(self.num_nodes)
+        )
+        self.configs = [
+            cfg(base_cfg % (nodes, 4001 + x, 9001 + x))
+            for x in range(self.num_nodes)
+        ]
 
         super(Complex, self).__init__(*args, **kwargs)
 
     def setUp(self):
         LockProtocol.send_line_hooks = []
+        self.servers = []
 
-        self.s1 = LockFactory(self.cfg1)
-        self.s2 = LockFactory(self.cfg2)
-        self.s3 = LockFactory(self.cfg3)
-        self.servers = [self.s1, self.s2, self.s3]
-
-        for s in self.servers:
+        for x, cfg in enumerate(self.configs):
+            s = LockFactory(cfg)
+            setattr(self, 's%s' % (x+1), s)
+            self.servers.append(s)
             self.addCleanup(s.close)
+
 
     @inlineCallbacks
     def wait_when_connection_establied(self):
