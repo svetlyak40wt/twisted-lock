@@ -31,7 +31,7 @@ class ME: pass
 
 class PaxosProposer(object):
     def __init__(self, factory, number, value):
-        self.log = logging.getLogger('paxos.proposer')
+        self.log = logging.getLogger('paxos.proposer.%s' % factory.port)
         self.deferred = Deferred()
         self.number = number
         self.value = value
@@ -104,7 +104,7 @@ class PaxosAcceptor(object):
     def __init__(self, factory):
         self.factory = factory
         self.max_seen_id = 0
-        self.log = logging.getLogger('paxos.acceptor')
+        self.log = logging.getLogger('paxos.acceptor.%s' % factory.port)
         self.values = {}
 
         factory.add_callback('paxos-prepare .*', self.on_prepare)
@@ -127,6 +127,13 @@ class PaxosAcceptor(object):
 class LockProtocol(LineReceiver):
     def __init__(self):
         self.other_side = (None, None)
+        self._log = None
+
+    @property
+    def log(self):
+        if self._log is None:
+            self._log = logging.getLogger('lockprotocol.%s' % self.factory.port)
+        return self._log
 
 
     def connectionMade(self):
@@ -134,12 +141,11 @@ class LockProtocol(LineReceiver):
 
 
     def connectionLost(self, reason):
-        print 'Connection to the %s:%s lost.' % self.other_side
-        self.factory.remove_connection(self.other_side)
+        self.factory.remove_connection(self)
 
 
     def lineReceived(self, line):
-        print 'RECV:', line
+        self.log.info('RECV: ' + line)
         parsed = shlex.split(line)
         command = parsed[0]
         args = parsed[1:]
@@ -154,12 +160,12 @@ class LockProtocol(LineReceiver):
 
 
     def sendLine(self, line):
-        print 'SEND:', line
+        self.log.info('SEND: ' + line)
         return LineReceiver.sendLine(self, line)
 
 
     def cmd_hello(self, host, port, client = None):
-        print 'Received hello from %s:%s' % (host, port)
+        self.log.info('Received hello from %s:%s' % (host, port))
 
         port = int(port)
         addr = (host, port)
@@ -178,12 +184,18 @@ class LockFactory(ClientFactory):
         self.port = port
         self.interface = interface
         self.master = None
+        self.log = logging.getLogger('lockfactory.%s' % self.port)
 
         self.connections = {}
+        self._all_connections = []
         self.neighbours = [
             conn for conn in server_list
             if conn != (self.interface, self.port)
         ]
+
+        # list of deferreds to be called when
+        # connections with all other nodes will be established
+        self._connection_waiters = []
 
         # state
         self._log = []
@@ -207,17 +219,24 @@ class LockFactory(ClientFactory):
         self._webport_listener.stopListening()
         stop_waiting(self._delayed_reconnect)
 
+        for conn in self._all_connections:
+            if conn.connected:
+                conn.transport.loseConnection()
+
 
     def add_callback(self, regex, callback):
         self.callbacks.append((re.compile(regex), callback))
 
+
     def remove_callback(self, callback):
         self.callbacks = filter(lambda x: x[1] != callback, self.callbacks)
+
 
     def find_callback(self, line):
         for regex, callback in self.callbacks:
             if regex.match(line) != None:
                 return callback
+
 
     def get_key(self, key):
         d = Deferred()
@@ -257,23 +276,46 @@ class LockFactory(ClientFactory):
     def add_connection(self, addr, protocol):
         old = self.connections.get(addr, None)
 
-        if old is not None:
-            print 'We already have connection with %s:%s' % addr
+        if old is not None and old.connected and addr > (self.interface, self.port):
+            self.log.info('We already have connection with %s:%s (%s)' % (addr[0], addr[1], protocol.transport.getPeer()))
             protocol.transport.loseConnection()
+            self._all_connections.remove(protocol)
         else:
-            print 'Adding %s:%s to the connections list' % addr
+            self.log.info('Adding %s:%s to the connections list' % addr)
             self.connections[addr] = protocol
+            if len(self.connections) == len(self.neighbours):
+                for waiter in self._connection_waiters:
+                    waiter.callback(True)
+                self._connection_waiters = []
 
 
-    def remove_connection(self, addr):
-        del self.connections[addr]
+    def remove_connection(self, protocol):
+        for key, value in self.connections.items():
+            if value == protocol:
+                self.log.info(
+                    'Connection to the %s:%s (%s) lost.' % (
+                        protocol.other_side[0],
+                        protocol.other_side[1],
+                        protocol.transport.getPeer()
+                    )
+                )
+                del self.connections[key]
+                break
+
+
+    def when_connected(self):
+        d = Deferred()
+        self._connection_waiters.append(d)
+        return d
 
 
     def startFactory(self):
+        self.log.info('callWhen running %s:%s' % (self.interface, self.port))
         reactor.callWhenRunning(self._reconnect)
 
 
     def _reconnect(self):
+        self.log.info('reconnecting')
         for host, port in self.neighbours:
             if (host, port) not in self.connections:
                 reactor.connectTCP(host, port, self)
@@ -282,24 +324,26 @@ class LockFactory(ClientFactory):
 
 
     def startedConnecting(self, connector):
-        print 'Started to connect to another server: %s:%s' % (
+        self.log.info('Started to connect to another server: %s:%s' % (
             connector.host,
             connector.port
-        )
+        ))
 
 
     def buildProtocol(self, addr):
         conn = addr.host, addr.port
-        print 'Connected to another server: %s:%s' % conn
-        return ClientFactory.buildProtocol(self, addr)
+        self.log.info('Connected to another server: %s:%s' % conn)
+        result = ClientFactory.buildProtocol(self, addr)
+        self._all_connections.append(result)
+        return result
 
 
     def clientConnectionFailed(self, connector, reason):
-        print 'Connection to %s:%s failed. Reason: %s' % (
+        self.log.info('Connection to %s:%s failed. Reason: %s' % (
             connector.host,
             connector.port,
             reason
-        )
+        ))
 
 
     def broadcast(self, line):
@@ -307,23 +351,27 @@ class LockFactory(ClientFactory):
             connection.sendLine(line)
         return len(self.connections)
 
+
     def on_accept(self, value):
+        self.master = (self.interface, self.port)
         self._log.append(value)
         splitted = shlex.split(value)
         command = '_log_cmd_' + splitted[0].replace('-', '_')
         cmd = getattr(self, command)
         return cmd(*splitted[1:])
 
+
     def _log_cmd_set_key(self, key, value):
         self._keys[key] = value
         return value
+
 
     def _log_cmd_del_key(self, key):
         return self._keys.pop(key)
 
 
-trace_all(PaxosProposer)
-trace_all(PaxosAcceptor)
-trace_all(LockProtocol)
-trace_all(LockFactory)
+#trace_all(PaxosProposer)
+#trace_all(PaxosAcceptor)
+#trace_all(LockProtocol)
+#trace_all(LockFactory)
 
