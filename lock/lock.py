@@ -6,6 +6,7 @@ import logging
 import shlex
 
 from math import ceil
+from operator import itemgetter
 from twisted.internet.protocol import ClientFactory
 from twisted.protocols.basic import LineReceiver
 from twisted.internet import reactor
@@ -23,10 +24,9 @@ def stop_waiting(timeout):
         timeout.cancel()
 
 
-TIMEOUT = 5
-
-# Special value to specify myself as master
-class ME: pass
+PREPARE_TIMEOUT = 1
+ACCEPT_TIMEOUT = 1
+RECONNECT_INTERVAL = 5
 
 
 class PaxosProposer(object):
@@ -45,7 +45,7 @@ class PaxosProposer(object):
 
         factory.add_callback('paxos-ack %s.*' % self.number, self.on_ack)
         factory.add_callback('paxos-nack %s' % self.number, self.on_nack)
-        self.prepare_timeout = reactor.callLater(5, self.end_prepare)
+        self.prepare_timeout = reactor.callLater(PREPARE_TIMEOUT, self.end_prepare)
 
     def on_ack(self, number, value, client = None):
         self.results.append(value)
@@ -81,7 +81,7 @@ class PaxosProposer(object):
             self.accept_requests = self.factory.broadcast('paxos-accept %s "%s"' % (self.number, escape(self.value)))
             self.accept_responses = 0
             self.factory.add_callback('paxos-accepted %s' % self.number, self.on_accepted)
-            self.accept_timeout = reactor.callLater(5, self.fail)
+            self.accept_timeout = reactor.callLater(ACCEPT_TIMEOUT, self.fail)
         else:
             self.log.error('No accepts was received or they are with some other values')
             self.fail()
@@ -144,7 +144,7 @@ class LockProtocol(LineReceiver):
 
 
     def connectionMade(self):
-        self.sendLine('hello %s %s' % (self.factory.interface, self.factory.port))
+        pass
 
 
     def connectionLost(self, reason):
@@ -174,15 +174,6 @@ class LockProtocol(LineReceiver):
                 callback(self, line)
 
         return LineReceiver.sendLine(self, line)
-
-
-    def cmd_hello(self, host, port, client = None):
-        self.log.info('Received hello from %s:%s' % (host, port))
-
-        port = int(port)
-        addr = (host, port)
-        self.other_side = addr
-        self.factory.add_connection(addr, self)
 
 
 
@@ -237,9 +228,7 @@ class LockFactory(ClientFactory):
         if self._delayed_reconnect is not None:
             stop_waiting(self._delayed_reconnect)
 
-        for conn in self._all_connections:
-            if conn.connected:
-                conn.transport.loseConnection()
+        self.disconnect()
 
 
     def add_callback(self, regex, callback):
@@ -291,30 +280,24 @@ class LockFactory(ClientFactory):
         return self._start_paxos(value)
 
 
-    def add_connection(self, addr, protocol):
-        old = self.connections.get(addr, None)
+    def add_connection(self, conn):
+        self.connections[conn.other_side] = conn
+        num_disconnected = len(self.neighbours) - len(self.connections)
 
-        if old is not None and old.connected and addr > (self.interface, self.port):
-            self.log.info('We already have connection with %s:%s (%s)' % (addr[0], addr[1], protocol.transport.getPeer()))
-            protocol.transport.loseConnection()
-            self._all_connections.remove(protocol)
-        else:
-            self.log.info('Adding %s:%s to the connections list' % addr)
-            self.connections[addr] = protocol
-            if len(self.connections) == len(self.neighbours):
-                for waiter in self._connection_waiters:
-                    waiter.callback(True)
-                self._connection_waiters = []
+        if num_disconnected == 0:
+            for waiter in self._connection_waiters:
+                waiter.callback(True)
+            self._connection_waiters = []
 
 
-    def remove_connection(self, protocol):
+    def remove_connection(self, conn):
         for key, value in self.connections.items():
-            if value == protocol:
+            if value == conn:
                 self.log.info(
                     'Connection to the %s:%s (%s) lost.' % (
-                        protocol.other_side[0],
-                        protocol.other_side[1],
-                        protocol.transport.getPeer()
+                        conn.other_side[0],
+                        conn.other_side[1],
+                        conn.transport.getPeer()
                     )
                 )
                 del self.connections[key]
@@ -325,6 +308,12 @@ class LockFactory(ClientFactory):
         d = Deferred()
         self._connection_waiters.append(d)
         return d
+
+
+    def disconnect(self):
+        for conn in self._all_connections:
+            if conn.connected:
+                conn.transport.loseConnection()
 
 
     def startFactory(self):
@@ -338,7 +327,7 @@ class LockFactory(ClientFactory):
             if (host, port) not in self.connections:
                 reactor.connectTCP(host, port, self)
 
-        self._delayed_reconnect = reactor.callLater(5, self._reconnect)
+        self._delayed_reconnect = reactor.callLater(RECONNECT_INTERVAL, self._reconnect)
 
 
     def startedConnecting(self, connector):
@@ -350,9 +339,17 @@ class LockFactory(ClientFactory):
 
     def buildProtocol(self, addr):
         conn = addr.host, addr.port
-        self.log.info('Connected to another server: %s:%s' % conn)
+
         result = ClientFactory.buildProtocol(self, addr)
+        result.other_side = conn
+
         self._all_connections.append(result)
+
+        if addr.port in map(itemgetter(1), self.neighbours):
+            self.log.info('Connected to another server: %s:%s' % conn)
+            self.add_connection(result)
+        else:
+            self.log.info('Connection from another server accepted: %s:%s' % conn)
         return result
 
 
