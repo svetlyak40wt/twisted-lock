@@ -6,6 +6,7 @@ import logging
 import shlex
 
 from math import ceil
+from bisect import bisect_left, bisect_right
 from operator import itemgetter
 from twisted.internet.protocol import ClientFactory
 from twisted.protocols.basic import LineReceiver
@@ -14,7 +15,7 @@ from twisted.internet.defer import Deferred
 from twisted.python import failure
 from twisted.web import server
 
-from . utils import parse_ip, parse_ips, trace_all, escape
+from . utils import parse_ip, parse_ips, escape
 from . exceptions import KeyAlreadyExists, KeyNotFound, PaxosFailed
 from . web import Root
 
@@ -78,7 +79,13 @@ class PaxosProposer(object):
         results = filter(None, self.results)
 
         if len(results) == 0 or self.value in results:
-            self.accept_requests = self.factory.broadcast('paxos-accept %s "%s"' % (self.number, escape(self.value)))
+            self.accept_requests = self.factory.broadcast(
+                'paxos-accept %s %s "%s"' % (
+                    self.number,
+                    self.factory.last_accepted_iteration,
+                    escape(self.value)
+                )
+            )
             self.accept_responses = 0
             self.factory.add_callback('paxos-accepted %s' % self.number, self.on_accepted)
             self.accept_timeout = reactor.callLater(ACCEPT_TIMEOUT, self.fail)
@@ -87,6 +94,7 @@ class PaxosProposer(object):
             self.fail()
 
     def on_accepted(self, number, client = None):
+        self.factory.last_accepted_iteration = int(number)
         self.accept_responses += 1
         threshold = ceil(self.accept_requests / 2.0)
         if self.accept_responses >= threshold:
@@ -105,7 +113,8 @@ class PaxosAcceptor(object):
         self.factory = factory
         self.max_seen_id = 0
         self.log = logging.getLogger('paxos.acceptor.%s' % factory.port)
-        self.values = {}
+        self._values = []
+        self._nums = []
 
         factory.add_callback('paxos-prepare .*', self.on_prepare)
         factory.add_callback('paxos-accept .*', self.on_accept)
@@ -114,14 +123,34 @@ class PaxosAcceptor(object):
         num = int(num)
         if num > self.max_seen_id:
             self.max_seen_id = num
-            client.sendLine('paxos-ack %s "%s"' % (num, escape(self.values.get(num, ''))))
+            client.sendLine('paxos-ack %s "%s"' % (num, escape(self._find_value(num, ''))))
         else:
             client.sendLine('paxos-nack %s' % num)
 
-    def on_accept(self, num, value, client = None):
-        self.values[int(num)] = value
-        client.sendLine('paxos-accepted %s' % num)
-        self.factory.on_accept(value)
+    def on_accept(self, num, last_accepted_iteration, value, client = None):
+        num = int(num)
+        last_accepted_iteration = int(last_accepted_iteration)
+        if self.factory.last_accepted_iteration != last_accepted_iteration:
+            self.factory.set_stale_state()
+        else:
+            self._add_value(int(num), value)
+            client.sendLine('paxos-accepted %s' % num)
+            self.factory.on_accept(value)
+            self.factory.last_accepted_iteration = num
+
+    def _find_value(self, num, default = None):
+        """ Searches value for iteration `num` if it was
+            received during previous paxos iterations.
+        """
+        i = bisect_left(self._nums, num)
+        if i != len(self._nums) and self._nums[i] == num:
+            return self._values[i]
+        return default
+
+    def _add_value(self, num, value):
+        i = bisect_right(self._nums, num)
+        self._nums.insert(i, num)
+        self._values.insert(i, value)
 
 
 class LockProtocol(LineReceiver):
@@ -176,7 +205,6 @@ class LockProtocol(LineReceiver):
         return LineReceiver.sendLine(self, line)
 
 
-
 class LockFactory(ClientFactory):
     protocol = LockProtocol
 
@@ -204,6 +232,7 @@ class LockFactory(ClientFactory):
         self._log = []
         self._keys = {}
         self._paxos_id = 0
+        self.last_accepted_iteration = 0
         self.state = []
         self.callbacks = []
 
@@ -384,7 +413,10 @@ class LockFactory(ClientFactory):
     def _log_cmd_del_key(self, key):
         return self._keys.pop(key)
 
+    def set_stale_state(self):
+        pass
 
+#from . utils import trace_all
 #trace_all(PaxosProposer)
 #trace_all(PaxosAcceptor)
 #trace_all(LockProtocol)
