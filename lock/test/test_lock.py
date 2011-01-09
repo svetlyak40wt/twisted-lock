@@ -168,14 +168,22 @@ class Failures(TestCase):
 
         for x, s in enumerate(self.servers):
             try:
-                #self.assert_('blah' in s._keys)
-                #self.assert_('minor' in s._keys)
-                #self.assert_('again' in s._keys)
                 self.assertEqual({'blah': '', 'minor': '', 'again': ''}, s._keys)
             except Exception, e:
-                import pdb;pdb.set_trace()
                 e.args = ('In %s server: ' % (x + 1) + e.args[0],)
                 raise
+
+        # full log here
+        self.assertEqual(
+            [
+                'set-key blah ""',
+                'set-key minor ""',
+                'set-key again ""',
+            ],
+            self.s2._log
+        )
+        # last command only, because this node received a snapshot
+        self.assertEqual(['set-key again ""'], self.s3._log)
 
 
 # какие могут быть тесты
