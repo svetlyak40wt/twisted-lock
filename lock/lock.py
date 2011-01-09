@@ -159,7 +159,7 @@ class PaxosAcceptor(object):
         self._values.insert(i, value)
 
 
-class Replicator(object):
+class Syncronizer(object):
     """ This class handles replication.
         When the node data become stale, it changes it's
         state and does not participate in Paxos until
@@ -284,7 +284,7 @@ class LockFactory(ClientFactory):
         self.callbacks = []
 
         self.acceptor = PaxosAcceptor(self)
-        self.replicator = Replicator(self)
+        self.replicator = Syncronizer(self)
 
         self._port_listener = reactor.listenTCP(self.port, self, interface = self.interface)
         self._delayed_reconnect = None
@@ -494,4 +494,3 @@ class LockFactory(ClientFactory):
 #trace_all(PaxosAcceptor)
 #trace_all(LockProtocol)
 #trace_all(LockFactory)
-
