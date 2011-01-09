@@ -50,7 +50,6 @@ listen = %s
 
         super(TestCase, self).__init__(*args, **kwargs)
 
-
     def setUp(self):
         LockProtocol.send_line_hooks = []
         self.servers = []
@@ -59,7 +58,25 @@ listen = %s
             s = LockFactory(cfg)
             setattr(self, 's%s' % (x+1), s)
             self.servers.append(s)
-            self.addCleanup(s.close)
+        self.addCleanup(self._close_servers)
+
+    @inlineCallbacks
+    def _close_servers(self):
+        for server in self.servers:
+            if server is not None:
+                yield server.close()
+
+    @inlineCallbacks
+    def stop_server(self, number):
+        s = getattr(self, 's%s' % number)
+        setattr(self, 's%s' % number, None)
+        result = yield s.close()
+        self.servers[number - 1] = None
+
+    def start_server(self, number):
+        s = LockFactory(self.configs[number - 1])
+        setattr(self, 's%s' % number, s)
+        self.servers[number - 1] = s
 
     @inlineCallbacks
     def wait_when_connection_establied(self):
@@ -128,11 +145,11 @@ class Replication(TestCase):
             )
 
 
-class DropConnections(TestCase):
+class Disconnections(TestCase):
     num_nodes = 5
 
     @inlineCallbacks
-    def _run_test(self):
+    def _run_disconnection_test(self):
         """ Adds three keys into the cluster. """
         yield self.wait_when_connection_establied()
 
@@ -159,12 +176,7 @@ class DropConnections(TestCase):
 
         result = yield add_again
 
-        for x, s in enumerate(self.servers):
-            try:
-                self.assertEqual({'blah': '', 'minor': '', 'again': ''}, s._keys)
-            except Exception, e:
-                e.args = ('In %s server: ' % (x + 1) + e.args[0],)
-                raise
+        self._assert_servers_consistency('blah', 'minor', 'again')
 
         # full log here
         self.assertEqual(
@@ -178,7 +190,6 @@ class DropConnections(TestCase):
         # last command only, because this node received a snapshot
         self.assertEqual(['set-key again ""'], self.s3._log)
 
-
     @inlineCallbacks
     def test_connection_lost_during_accept(self):
         """ Отключение узла когда он принимает accept."""
@@ -189,8 +200,7 @@ class DropConnections(TestCase):
 
         LockProtocol.send_line_hooks = [(
             re.compile(r'^paxos-accept 1 .*'), drop_connection)]
-        yield self._run_test()
-
+        yield self._run_disconnection_test()
 
     @inlineCallbacks
     def test_connection_lost_during_prepare(self):
@@ -203,12 +213,51 @@ class DropConnections(TestCase):
         LockProtocol.send_line_hooks = [(
             re.compile('^paxos-prepare 1$'), drop_connection)]
 
-        yield self._run_test()
+        yield self._run_disconnection_test()
+
+    @inlineCallbacks
+    def test_connect_node_to_working_system(self):
+        """ Подключение узла (чистого) к системе в которой уже есть несколько операций. """
+        result = yield self.stop_server(3)
+
+        yield self._add_key('blah')
+        yield self._add_key('minor')
+        yield self._add_key('again')
+
+        self.start_server(3)
+
+        yield self.wait_when_connection_establied()
+        yield self._add_key('and-again')
+        yield self._add_key('and-one-more')
+
+        self._assert_servers_consistency('blah', 'minor', 'again', 'and-again', 'and-one-more')
+        self.assertEqual(False, self.s3.get_stale())
+        self.assertEqual(['set-key and-one-more ""'], self.s3._log)
+
+
+    @inlineCallbacks
+    def _add_key(self, key):
+        result = yield self.client.request(
+            'POST',
+            'http://%s:%s/%s' % (self.s1.http_interface, self.s1.http_port, key)
+        )
+        self.assertEqual(OK, result.code)
+
+    def _assert_servers_consistency(self, *args):
+        for x, s in enumerate(self.servers):
+            if s is not None:
+                try:
+                    self.assertEqual(
+                        dict((item, '') for item in args),
+                        s._keys
+                    )
+                except Exception, e:
+                    e.args = ('In %s server: ' % (x + 1) + e.args[0],)
+                    raise
 
 
 
 # какие могут быть тесты
-# 3. Подключение узла (чистого) к системе в которой уже есть несколько операций.
 # 4. Одновременное добавление лока через разные ноды должно приводить только к одной успешной операции.
 # 5. Одновременное добавление разных локов через разные ноды должно приводить только к одинаковым логам на каждом узле.
 # 6. После временного отключения и последующего подключения узла, он должен узнавать о состоянии системы

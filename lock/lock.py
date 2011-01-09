@@ -14,7 +14,7 @@ from operator import itemgetter
 from twisted.internet.protocol import ClientFactory
 from twisted.protocols.basic import LineReceiver
 from twisted.internet import reactor
-from twisted.internet.defer import Deferred
+from twisted.internet.defer import Deferred, inlineCallbacks, gatherResults
 from twisted.python import failure
 from twisted.web import server
 
@@ -260,6 +260,13 @@ class LockFactory(ClientFactory):
         self.interface = interface
         self.master = None
         self._stale = False
+        self._delayed_reconnect = None
+        # used to prevent server from reconnecting when it was
+        # closed in a unittest
+        self._closed = False
+        # this flag is used to prevent recursion in _reconnect method
+        self._reconnecting = False
+
         self.log = logging.getLogger('lockfactory.%s' % self.port)
 
         self.connections = {}
@@ -287,7 +294,6 @@ class LockFactory(ClientFactory):
         self.replicator = Syncronizer(self)
 
         self._port_listener = reactor.listenTCP(self.port, self, interface = self.interface)
-        self._delayed_reconnect = None
 
         self.web_server = server.Site(Root(self))
 
@@ -300,12 +306,15 @@ class LockFactory(ClientFactory):
 
 
     def close(self):
-        self._port_listener.stopListening()
-        self._webport_listener.stopListening()
+        self._closed = True
+
+        d1 = self._port_listener.stopListening()
+        d2 = self._webport_listener.stopListening()
         if self._delayed_reconnect is not None:
             stop_waiting(self._delayed_reconnect)
 
         self.disconnect()
+        return gatherResults([d1, d2])
 
 
     def add_callback(self, regex, callback):
@@ -407,12 +416,18 @@ class LockFactory(ClientFactory):
 
 
     def _reconnect(self):
-        for host, port in self.neighbours:
-            if (host, port) not in self.connections:
-                self.log.info('reconnecting to %s:%s' % (host, port))
-                reactor.connectTCP(host, port, self)
+        if not self._closed and not self._reconnecting:
+            try:
+                self._reconnecting = True
 
-        self._delayed_reconnect = reactor.callLater(RECONNECT_INTERVAL, self._reconnect)
+                for host, port in self.neighbours:
+                    if (host, port) not in self.connections:
+                        self.log.info('reconnecting to %s:%s' % (host, port))
+                        reactor.connectTCP(host, port, self)
+
+                self._delayed_reconnect = reactor.callLater(RECONNECT_INTERVAL, self._reconnect)
+            finally:
+                self._reconnecting = False
 
 
     def startedConnecting(self, connector):
