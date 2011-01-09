@@ -2,11 +2,11 @@
 from __future__ import absolute_import
 
 import re
-import logging
 
 from twisted.trial import unittest
 from twisted.web.client import Agent
 from twisted.internet import reactor
+from twisted.internet.base import DelayedCall
 from twisted.internet.task import deferLater
 from twisted.internet.defer import inlineCallbacks, gatherResults
 from twisted.web.http import EXPECTATION_FAILED, OK
@@ -15,6 +15,8 @@ from StringIO import StringIO
 from .. lock import LockFactory, LockProtocol
 from .. config import Config
 from .. utils import init_logging
+
+DelayedCall.debug = True
 
 def cfg(text):
     config = Config()
@@ -147,17 +149,31 @@ class Failures(TestCase):
         )
         self.assertEqual(OK, result.code)
 
-        yield self.wait_when_connection_establied()
+        result = yield self.wait_when_connection_establied()
 
         result = yield self.client.request(
             'POST',
             'http://%s:%s/minor' % (self.s1.http_interface, self.s1.http_port)
         )
 
+        add_again = deferLater(reactor, 0.5, lambda:
+            self.client.request(
+                'POST',
+                'http://%s:%s/again' % (self.s1.http_interface, self.s1.http_port)
+            )
+        )
+        result = yield self.s3.when_sync_completed()
+
+        result = yield add_again
+
         for x, s in enumerate(self.servers):
             try:
-                self.assertEqual({'blah': '', 'minor': ''}, s._keys)
+                #self.assert_('blah' in s._keys)
+                #self.assert_('minor' in s._keys)
+                #self.assert_('again' in s._keys)
+                self.assertEqual({'blah': '', 'minor': '', 'again': ''}, s._keys)
             except Exception, e:
+                import pdb;pdb.set_trace()
                 e.args = ('In %s server: ' % (x + 1) + e.args[0],)
                 raise
 

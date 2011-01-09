@@ -4,6 +4,9 @@ from __future__ import absolute_import
 import re
 import logging
 import shlex
+import random
+import pickle
+import base64
 
 from math import ceil
 from bisect import bisect_left, bisect_right
@@ -111,10 +114,12 @@ class PaxosProposer(object):
 class PaxosAcceptor(object):
     def __init__(self, factory):
         self.factory = factory
-        self.max_seen_id = 0
+        self.max_seen_id = 0 # maximum seen paxos ID
         self.log = logging.getLogger('paxos.acceptor.%s' % factory.port)
-        self._values = []
-        self._nums = []
+        # sorted collection for storing values of
+        # the previous paxos iterations
+        self._nums = []   # sorted paxos IDs
+        self._values = [] # corresponding values
 
         factory.add_callback('paxos-prepare .*', self.on_prepare)
         factory.add_callback('paxos-accept .*', self.on_accept)
@@ -131,8 +136,9 @@ class PaxosAcceptor(object):
         num = int(num)
         last_accepted_iteration = int(last_accepted_iteration)
         if self.factory.last_accepted_iteration != last_accepted_iteration:
-            self.factory.set_stale_state()
+            self.factory.set_stale(True)
         else:
+            self.factory.set_stale(False)
             self._add_value(int(num), value)
             client.sendLine('paxos-accepted %s' % num)
             self.factory.on_accept(value)
@@ -151,6 +157,44 @@ class PaxosAcceptor(object):
         i = bisect_right(self._nums, num)
         self._nums.insert(i, num)
         self._values.insert(i, value)
+
+
+class Replicator(object):
+    """ This class handles replication.
+        When the node data become stale, it changes it's
+        state and does not participate in Paxos until
+        synchronize data with other nodes.
+    """
+    def __init__(self, factory):
+        self._factory = factory
+        self._other_node = None
+
+        factory.add_callback('sync-request', self.on_sync_request)
+        factory.add_callback('sync-snapshot .*', self.on_sync_snapshot)
+
+    def on_sync_snapshot(self, data, client = None):
+        if self._factory.get_stale() is True:
+            data = pickle.loads(base64.b64decode(data))
+            self._factory._keys = data['keys']
+            self._factory.last_accepted_iteration = data['last_accepted_iteration']
+            #self._factory.acceptor.max_seen_id = data['max_seen_id']
+
+    def on_sync_request(self, client = None):
+        data = dict(
+            keys = self._factory._keys,
+            last_accepted_iteration = self._factory.last_accepted_iteration,
+            #max_seen_id = self._factory.acceptor.max_seen_id,
+        )
+        client.sendLine(
+            'sync-snapshot ' + base64.b64encode(pickle.dumps(data))
+        )
+
+    def send_sync_request(self):
+        """ Starts sync process. """
+        if not self._factory.connections:
+            raise RuntimeError('No nodes to sync with.')
+        self._other_node = random.choice(self._factory.connections.values())
+        self._other_node.sendLine('sync-request')
 
 
 class LockProtocol(LineReceiver):
@@ -215,6 +259,7 @@ class LockFactory(ClientFactory):
         self.port = port
         self.interface = interface
         self.master = None
+        self._stale = False
         self.log = logging.getLogger('lockfactory.%s' % self.port)
 
         self.connections = {}
@@ -227,16 +272,19 @@ class LockFactory(ClientFactory):
         # list of deferreds to be called when
         # connections with all other nodes will be established
         self._connection_waiters = []
+        # same for sync complete event
+        self._sync_completion_waiters = []
 
         # state
         self._log = []
         self._keys = {}
-        self._paxos_id = 0
+        # last successful Paxos ID
         self.last_accepted_iteration = 0
         self.state = []
         self.callbacks = []
 
         self.acceptor = PaxosAcceptor(self)
+        self.replicator = Replicator(self)
 
         self._port_listener = reactor.listenTCP(self.port, self, interface = self.interface)
         self._delayed_reconnect = None
@@ -339,6 +387,14 @@ class LockFactory(ClientFactory):
         return d
 
 
+    def when_sync_completed(self):
+        if not self.get_stale():
+            raise RuntimeError('Is not syncing')
+        d = Deferred()
+        self._sync_completion_waiters.append(d)
+        return d
+
+
     def disconnect(self):
         for conn in self._all_connections:
             if conn.connected:
@@ -351,9 +407,9 @@ class LockFactory(ClientFactory):
 
 
     def _reconnect(self):
-        self.log.info('reconnecting')
         for host, port in self.neighbours:
             if (host, port) not in self.connections:
+                self.log.info('reconnecting to %s:%s' % (host, port))
                 reactor.connectTCP(host, port, self)
 
         self._delayed_reconnect = reactor.callLater(RECONNECT_INTERVAL, self._reconnect)
@@ -413,8 +469,25 @@ class LockFactory(ClientFactory):
     def _log_cmd_del_key(self, key):
         return self._keys.pop(key)
 
-    def set_stale_state(self):
-        pass
+
+    def get_stale(self):
+        """ Shows if this node is stale and should be synced. """
+        return self._stale
+
+    def set_stale(self, value):
+        if self._stale is True:
+            if value is False:
+                self.log.error('Synced, switched to the "normal" mode.')
+                # Notify all waiters that node's state was synced.
+                for waiter in self._sync_completion_waiters:
+                    waiter.callback(True)
+                self._sync_completion_waiters = []
+        elif value is True:
+            self.log.error('Node is out of sync, switched to "sync" mode.')
+            self.replicator.send_sync_request()
+
+        self._stale = value
+
 
 #from . utils import trace_all
 #trace_all(PaxosProposer)
