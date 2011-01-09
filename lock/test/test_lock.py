@@ -132,17 +132,9 @@ class DropConnections(TestCase):
     num_nodes = 5
 
     @inlineCallbacks
-    def test_connection_lost_during_prepare(self):
-        """ Отключение узла когда он принимает prepare."""
+    def _run_test(self):
+        """ Adds three keys into the cluster. """
         yield self.wait_when_connection_establied()
-
-        def drop_connection(conn, line):
-            if conn.other_side[1] == self.s3.port:
-                LockProtocol.send_line_hooks = []
-                self.s3.disconnect()
-
-        LockProtocol.send_line_hooks = [(
-            re.compile('^paxos-prepare 1$'), drop_connection)]
 
         result = yield self.client.request(
             'POST',
@@ -190,8 +182,6 @@ class DropConnections(TestCase):
     @inlineCallbacks
     def test_connection_lost_during_accept(self):
         """ Отключение узла когда он принимает accept."""
-        yield self.wait_when_connection_establied()
-
         def drop_connection(conn, line):
             if conn.other_side[1] == self.s3.port:
                 LockProtocol.send_line_hooks = []
@@ -199,48 +189,22 @@ class DropConnections(TestCase):
 
         LockProtocol.send_line_hooks = [(
             re.compile(r'^paxos-accept 1 .*'), drop_connection)]
+        yield self._run_test()
 
-        result = yield self.client.request(
-            'POST',
-            'http://%s:%s/blah' % (self.s1.http_interface, self.s1.http_port)
-        )
-        self.assertEqual(OK, result.code)
 
-        result = yield self.wait_when_connection_establied()
+    @inlineCallbacks
+    def test_connection_lost_during_prepare(self):
+        """ Отключение узла когда он принимает prepare."""
+        def drop_connection(conn, line):
+            if conn.other_side[1] == self.s3.port:
+                LockProtocol.send_line_hooks = []
+                self.s3.disconnect()
 
-        result = yield self.client.request(
-            'POST',
-            'http://%s:%s/minor' % (self.s1.http_interface, self.s1.http_port)
-        )
+        LockProtocol.send_line_hooks = [(
+            re.compile('^paxos-prepare 1$'), drop_connection)]
 
-        add_again = deferLater(reactor, 0.5, lambda:
-            self.client.request(
-                'POST',
-                'http://%s:%s/again' % (self.s1.http_interface, self.s1.http_port)
-            )
-        )
-        result = yield self.s3.when_sync_completed()
+        yield self._run_test()
 
-        result = yield add_again
-
-        for x, s in enumerate(self.servers):
-            try:
-                self.assertEqual({'blah': '', 'minor': '', 'again': ''}, s._keys)
-            except Exception, e:
-                e.args = ('In %s server: ' % (x + 1) + e.args[0],)
-                raise
-
-        # full log here
-        self.assertEqual(
-            [
-                'set-key blah ""',
-                'set-key minor ""',
-                'set-key again ""',
-            ],
-            self.s2._log
-        )
-        # last command only, because this node received a snapshot
-        self.assertEqual(['set-key again ""'], self.s3._log)
 
 
 # какие могут быть тесты
