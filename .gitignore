@@ -5,3 +5,4 @@ env
 .vim
 ctags
 .be/id-cache
+doc/_build
