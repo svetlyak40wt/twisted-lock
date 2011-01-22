@@ -14,7 +14,7 @@ from operator import itemgetter
 from twisted.internet.protocol import ClientFactory
 from twisted.protocols.basic import LineReceiver
 from twisted.internet import reactor
-from twisted.internet.defer import Deferred, inlineCallbacks, gatherResults
+from twisted.internet.defer import Deferred
 from twisted.python import failure
 from twisted.web import server
 
@@ -314,7 +314,6 @@ class LockFactory(ClientFactory):
             stop_waiting(self._delayed_reconnect)
 
         self.disconnect()
-        return gatherResults([d1, d2])
 
 
     def add_callback(self, regex, callback):

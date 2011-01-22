@@ -60,17 +60,15 @@ listen = %s
             self.servers.append(s)
         self.addCleanup(self._close_servers)
 
-    @inlineCallbacks
     def _close_servers(self):
         for server in self.servers:
             if server is not None:
-                yield server.close()
+                server.close()
 
-    @inlineCallbacks
     def stop_server(self, number):
         s = getattr(self, 's%s' % number)
         setattr(self, 's%s' % number, None)
-        result = yield s.close()
+        s.close()
         self.servers[number - 1] = None
 
     def start_server(self, number):
