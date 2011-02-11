@@ -20,7 +20,7 @@ def parse_ips(text):
     return map(parse_ip, text.split(','))
 
 
-def init_logging():
+def init_logging(config):
     _srcfile = twisted.python.log.__file__
     if _srcfile[-4:].lower() in ['.pyc', '.pyo']:
         _srcfile = _srcfile[:-4] + '.py'
@@ -30,6 +30,7 @@ def init_logging():
         logging._srcfile = _srcfile
 
         logging.basicConfig(
+            filename = config.get('logging', 'filename', None),
             level = logging.DEBUG,
             format = '%(asctime)s %(process)s/%(thread)s %(levelname)s %(name)s %(filename)s:%(lineno)s %(message)s',
         )

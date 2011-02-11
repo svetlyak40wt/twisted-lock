@@ -1,0 +1,6 @@
+function status() {
+    for i in `seq 5`
+    do
+        echo "== Server $i" && curl "http://127.0.0.1:900$i/info/status" && echo ''
+    done
+}

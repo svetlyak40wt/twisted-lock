@@ -1,6 +1,7 @@
 .*.swp
 *.pyc
 _*_temp
+*.log
 env
 .vim
 ctags

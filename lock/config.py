@@ -1,6 +1,7 @@
 import ConfigParser
 
-class Unspecified: pass
+class Unspecified:
+    pass
 
 class Config(ConfigParser.SafeConfigParser):
     def get(self, section, value, default = Unspecified):

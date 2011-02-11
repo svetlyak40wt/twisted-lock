@@ -28,8 +28,8 @@ def stop_waiting(timeout):
         timeout.cancel()
 
 
-PREPARE_TIMEOUT = 1
-ACCEPT_TIMEOUT = 1
+PREPARE_TIMEOUT = 5
+ACCEPT_TIMEOUT = 5
 RECONNECT_INTERVAL = 5
 
 
@@ -47,9 +47,9 @@ class PaxosProposer(object):
         self.state = 'waiting-promices'
         self.results = []
 
-        factory.add_callback('paxos-ack %s.*' % self.number, self.on_ack)
-        factory.add_callback('paxos-nack %s' % self.number, self.on_nack)
-        self.prepare_timeout = reactor.callLater(PREPARE_TIMEOUT, self.end_prepare)
+        factory.add_callback('^paxos-ack %s.*$' % self.number, self.on_ack)
+        factory.add_callback('^paxos-nack %s$' % self.number, self.on_nack)
+        self.prepare_timeout = reactor.callLater(PREPARE_TIMEOUT, self.end_prepare, reason = 'PREPARE_TIMEOUT %s' % self.number)
 
     def on_ack(self, number, value, client = None):
         self.results.append(value)
@@ -64,7 +64,9 @@ class PaxosProposer(object):
         if self.responses_count == self.requests_count:
             self.end_prepare()
 
-    def end_prepare(self):
+    def end_prepare(self, reason = None):
+        logging.info('%s end_prepare, reason=%r' % (self.number, reason))
+
         self.factory.remove_callback(self.on_ack)
         self.factory.remove_callback(self.on_nack)
         stop_waiting(self.prepare_timeout)
@@ -73,10 +75,11 @@ class PaxosProposer(object):
         threshold = ceil(self.requests_count / 2.0)
 
         if num_results > threshold:
+            logging.info('%s end_prepare, reason=%r, sending accept' % (self.number, reason))
             self.send_accept()
         else:
             self.log.error('Too small acks received: %s < %s' % (num_results, threshold))
-            self.fail()
+            self.fail(reason = reason)
 
     def send_accept(self):
         results = filter(None, self.results)
@@ -90,8 +93,8 @@ class PaxosProposer(object):
                 )
             )
             self.accept_responses = 0
-            self.factory.add_callback('paxos-accepted %s' % self.number, self.on_accepted)
-            self.accept_timeout = reactor.callLater(ACCEPT_TIMEOUT, self.fail)
+            self.factory.add_callback('^paxos-accepted %s$' % self.number, self.on_accepted)
+            self.accept_timeout = reactor.callLater(ACCEPT_TIMEOUT, self.fail, reason = 'ACCEPT_TIMEOUT %s' % self.number)
         else:
             self.log.error('No accepts was received or they are with some other values')
             self.fail()
@@ -100,14 +103,20 @@ class PaxosProposer(object):
         self.factory.last_accepted_iteration = int(number)
         self.accept_responses += 1
         threshold = ceil(self.accept_requests / 2.0)
+
+        self.log.debug('on_accepted accept_responses=%s, threshold=%s' % (self.accept_responses, threshold))
         if self.accept_responses >= threshold:
+            #self.factory.remove_callback(self.on_accepted)
+
             if not self.accept_timeout.cancelled:
+                self.log.debug('accept_timeout canceled.')
                 self.accept_timeout.cancel()
                 self.deferred.callback(self.value)
 
-    def fail(self):
+    def fail(self, reason = None):
+        self.log.warning('Paxos iteration failed (reason=%r)' % reason)
         self.deferred.errback(failure.Failure(
-            PaxosFailed('Paxos iteration failed'))
+            PaxosFailed('Paxos iteration failed (reason=%r)' % reason))
         )
 
 
@@ -121,8 +130,8 @@ class PaxosAcceptor(object):
         self._nums = []   # sorted paxos IDs
         self._values = [] # corresponding values
 
-        factory.add_callback('paxos-prepare .*', self.on_prepare)
-        factory.add_callback('paxos-accept .*', self.on_accept)
+        factory.add_callback('^paxos-prepare .*$', self.on_prepare)
+        factory.add_callback('^paxos-accept .*$', self.on_accept)
 
     def on_prepare(self, num, client = None):
         num = int(num)
@@ -133,15 +142,19 @@ class PaxosAcceptor(object):
             client.sendLine('paxos-nack %s' % num)
 
     def on_accept(self, num, last_accepted_iteration, value, client = None):
+        logging.info('%s on_accept %s' % (num, value))
         num = int(num)
         last_accepted_iteration = int(last_accepted_iteration)
-        if self.factory.last_accepted_iteration != last_accepted_iteration:
+        if self.factory.last_accepted_iteration < last_accepted_iteration:
             self.factory.set_stale(True)
         else:
             self.factory.set_stale(False)
             self._add_value(int(num), value)
             client.sendLine('paxos-accepted %s' % num)
-            self.factory.on_accept(value)
+            try:
+                self.factory.on_accept(value)
+            except Exception:
+                logging.exception('in factory.on_accept')
             self.factory.last_accepted_iteration = num
 
     def _find_value(self, num, default = None):
@@ -169,8 +182,8 @@ class Syncronizer(object):
         self._factory = factory
         self._other_node = None
 
-        factory.add_callback('sync-request', self.on_sync_request)
-        factory.add_callback('sync-snapshot .*', self.on_sync_snapshot)
+        factory.add_callback('^sync-request$', self.on_sync_request)
+        factory.add_callback('^sync-snapshot .*$', self.on_sync_snapshot)
 
     def on_sync_snapshot(self, data, client = None):
         if self._factory.get_stale() is True:
@@ -293,6 +306,7 @@ class LockFactory(ClientFactory):
         self.acceptor = PaxosAcceptor(self)
         self.replicator = Syncronizer(self)
 
+        self.log.debug('Opening the port %s:%s' % (self.interface, self.port))
         self._port_listener = reactor.listenTCP(self.port, self, interface = self.interface)
 
         self.web_server = server.Site(Root(self))
@@ -339,10 +353,21 @@ class LockFactory(ClientFactory):
         d.addCallback(cb)
         return d
 
+    def get_status(self):
+        """Returns a list of tuples (param_name, value)."""
+        return [
+            ('bind', '%s:%s' % (self.interface, self.port)),
+            ('master', self.master),
+            ('stale', self._stale),
+            ('max_seen_id', self.acceptor.max_seen_id),
+            ('last_accepted_id', self.last_accepted_iteration),
+            ('num_connections', len(self.connections)),
+        ]
+
 
     def set_key(self, key, value):
-        if key in self._keys:
-            raise KeyAlreadyExists('Key "%s" already exists' % key)
+        #if key in self._keys:
+        #    raise KeyAlreadyExists('Key "%s" already exists' % key)
 
         value = 'set-key %s "%s"' % (key, escape(value))
         return self._start_paxos(value)
@@ -358,8 +383,8 @@ class LockFactory(ClientFactory):
 
 
     def del_key(self, key):
-        if key not in self._keys:
-            raise KeyNotFound('Key "%s" not found' % key)
+        #if key not in self._keys:
+        #    raise KeyNotFound('Key "%s" not found' % key)
 
         value = 'del-key %s' % key
         return self._start_paxos(value)
@@ -411,8 +436,13 @@ class LockFactory(ClientFactory):
 
     def startFactory(self):
         self.log.info('callWhen running %s:%s' % (self.interface, self.port))
-        reactor.callWhenRunning(self._reconnect)
+        def delay_connect():
+            # delay connection to other server
+            # this is needed to start few test servers
+            # on the same machine without errors
+            self._delayed_reconnect = reactor.callLater(1, self._reconnect)
 
+        reactor.callWhenRunning(delay_connect)
 
     def _reconnect(self):
         if not self._closed and not self._reconnecting:
@@ -467,6 +497,7 @@ class LockFactory(ClientFactory):
 
 
     def on_accept(self, value):
+        logging.info('factory.on_accept %s' % (value,))
         self.master = (self.interface, self.port)
         self._log.append(value)
         splitted = shlex.split(value)
@@ -476,11 +507,17 @@ class LockFactory(ClientFactory):
 
 
     def _log_cmd_set_key(self, key, value):
+        if key in self._keys:
+            raise KeyAlreadyExists('Key "%s" already exists' % key)
+
         self._keys[key] = value
         return value
 
 
     def _log_cmd_del_key(self, key):
+        if key not in self._keys:
+            raise KeyNotFound('Key "%s" not found' % key)
+
         return self._keys.pop(key)
 
 
