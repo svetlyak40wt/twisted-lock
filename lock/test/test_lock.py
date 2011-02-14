@@ -20,7 +20,7 @@ from .. utils import init_logging
 DelayedCall.debug = True
 logging_config = ConfigParser()
 logging_config.add_section('logging')
-logging_config.set('logging', 'filename', 'unittest.log')
+logging_config.set('logging', 'filename', '')
 
 def cfg(text):
     config = Config()
@@ -38,6 +38,7 @@ class TestCase(unittest.TestCase):
         base_cfg = '''
 [cluster]
 nodes = %s
+first_connect_delay = 0
 [myself]
 listen = %s
 [web]

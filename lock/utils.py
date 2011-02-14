@@ -30,7 +30,7 @@ def init_logging(config):
         logging._srcfile = _srcfile
 
         logging.basicConfig(
-            filename = config.get('logging', 'filename', None),
+            filename = config.get('logging', 'filename') or None,
             level = logging.DEBUG,
             format = '%(asctime)s %(process)s/%(thread)s %(levelname)s %(name)s %(filename)s:%(lineno)s %(message)s',
         )

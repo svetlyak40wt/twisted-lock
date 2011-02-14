@@ -270,6 +270,7 @@ class LockFactory(ClientFactory):
     def __init__(self, config):
         interface, port = parse_ip(config.get('myself', 'listen', '4001'))
         server_list = parse_ips(config.get('cluster', 'nodes', '127.0.0.1:4001'))
+        self._first_connect_delay = float(config.get('cluster', 'first_connect_delay', 0))
 
         self.port = port
         self.interface = interface
@@ -425,14 +426,17 @@ class LockFactory(ClientFactory):
                 conn.transport.loseConnection()
 
     def startFactory(self):
-        self.log.info('callWhen running %s:%s' % (self.interface, self.port))
-        def delay_connect():
-            # delay connection to other server
-            # this is needed to start few test servers
-            # on the same machine without errors
-            self._delayed_reconnect = reactor.callLater(1, self._reconnect)
+        self.log.info('factory started at %s:%s' % (self.interface, self.port))
+        if self._first_connect_delay > 0:
+            def delay_connect():
+                # delay connection to other server
+                # this is needed to start few test servers
+                # on the same machine without errors
+                self._delayed_reconnect = reactor.callLater(self._first_connect_delay, self._reconnect)
 
-        reactor.callWhenRunning(delay_connect)
+            reactor.callWhenRunning(delay_connect)
+        else:
+            reactor.callWhenRunning(self._reconnect)
 
     def _reconnect(self):
         if not self._closed and not self._reconnecting:
