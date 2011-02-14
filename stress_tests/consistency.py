@@ -15,7 +15,7 @@ NUM_SERVERS = 5
 NUM_WORKERS = 4
 NUM_DATA_SLOTS = 2
 NUM_ITERATIONS = 10
-RANDOM_SERVER = True
+RANDOM_SERVER = False
 
 logger = Logger()
 
@@ -29,9 +29,14 @@ class DeleteRequest(urllib2.Request):
         return 'DELETE'
 
 
-def choose_server():
+_server_distribution = dict(
+    (worker_id, worker_id+1)#random.randint(1, NUM_SERVERS))
+    for worker_id in range(NUM_SERVERS)
+)
+
+def choose_server(worker_id):
     if RANDOM_SERVER:
-        return random.randint(1, NUM_SERVERS)
+        return _server_distribution[worker_id]
     return 1
 
 
@@ -53,7 +58,7 @@ def stop(servers):
 
 def lock(key, worker):
     logger.debug('locking %r' % (key,))
-    url = 'http://127.0.0.1:900%d/%s?w=%s' % (choose_server(), key, worker)
+    url = 'http://127.0.0.1:900%d/%s?w=%s' % (choose_server(worker), key, worker)
     request = PostRequest(url)
     num_retries = 10
     sleep_between = 1
@@ -63,7 +68,7 @@ def lock(key, worker):
             result = urllib2.urlopen(request)
         except urllib2.HTTPError, e:
             logger.error('lock HTTPError: %s, key %r' % (e, key))
-            if e.code == 417: # paxos failed, retry
+            if e.code in (409, 417): # key already exists or paxos failed, retry
                 num_retries -= 1
                 time.sleep(sleep_between)
                 sleep_between *= 2
@@ -72,6 +77,29 @@ def lock(key, worker):
         else:
             return True
     return False
+
+
+def unlock(key, worker):
+    logger.debug('unlocking %r' % (key,))
+    url = 'http://127.0.0.1:900%d/%s?w=%s' % (choose_server(worker), key, worker)
+    request = DeleteRequest(url)
+    num_retries = 10
+    sleep_between = 1
+
+    while num_retries > 0:
+        try:
+            result = urllib2.urlopen(request)
+            return
+        except urllib2.HTTPError, e:
+            logger.error('unlock HTTPError: %s, key %r' % (e, key))
+            if e.code == 417: # paxos failed, retry
+                num_retries -= 1
+                time.sleep(sleep_between)
+                sleep_between *= 2
+            else:
+                logger.critical('unlock failed because exception')
+                raise
+    logger.critical('unlock failed after retries')
 
 
 def compare_logs():
@@ -94,29 +122,6 @@ def compare_logs():
                 ', '.join(map(str, servers)),
                 log
             ))
-
-
-def unlock(key, worker):
-    logger.debug('unlocking %r' % (key,))
-    url = 'http://127.0.0.1:900%d/%s?w=%s' % (choose_server(), key, worker)
-    request = DeleteRequest(url)
-    num_retries = 10
-    sleep_between = 1
-
-    while num_retries > 0:
-        try:
-            result = urllib2.urlopen(request)
-            return
-        except urllib2.HTTPError, e:
-            logger.error('unlock HTTPError: %s, key %r' % (e, key))
-            if e.code == 417: # paxos failed, retry
-                num_retries -= 1
-                time.sleep(sleep_between)
-                sleep_between *= 2
-            else:
-                logger.critical('unlock failed because exception')
-                raise
-    logger.critical('unlock failed after retries')
 
 
 def test():
@@ -156,7 +161,7 @@ def test():
 
                 time.sleep(random.random() * 0.1)
 
-            logger.warning('exit from the worker, locals=%r' % (locals(),))
+            logger.debug('exit from the worker, locals=%r' % (locals(),))
 
 
     threads = [

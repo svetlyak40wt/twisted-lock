@@ -8,7 +8,7 @@ import random
 import pickle
 import base64
 
-from math import ceil
+from math import floor
 from bisect import bisect_left, bisect_right
 from operator import itemgetter
 from twisted.internet.protocol import ClientFactory
@@ -72,9 +72,9 @@ class PaxosProposer(object):
         stop_waiting(self.prepare_timeout)
 
         num_results = len(self.results)
-        threshold = ceil(self.requests_count / 2.0)
+        threshold = floor(self.requests_count / 2.0) + 1
 
-        if num_results > threshold:
+        if num_results >= threshold:
             logging.info('%s end_prepare, reason=%r, sending accept' % (self.number, reason))
             self.send_accept()
         else:
@@ -102,7 +102,7 @@ class PaxosProposer(object):
     def on_accepted(self, number, client = None):
         self.factory.last_accepted_iteration = int(number)
         self.accept_responses += 1
-        threshold = ceil(self.accept_requests / 2.0)
+        threshold = floor(self.accept_requests / 2.0) + 1
 
         self.log.debug('on_accepted accept_responses=%s, threshold=%s' % (self.accept_responses, threshold))
         if self.accept_responses >= threshold:
@@ -111,7 +111,7 @@ class PaxosProposer(object):
             if not self.accept_timeout.cancelled:
                 self.log.debug('accept_timeout canceled.')
                 self.accept_timeout.cancel()
-                self.deferred.callback(self.value)
+                self.deferred.callback((number, self.value))
 
     def fail(self, reason = None):
         self.log.warning('Paxos iteration failed (reason=%r)' % reason)
@@ -152,7 +152,9 @@ class PaxosAcceptor(object):
             self._add_value(int(num), value)
             client.sendLine('paxos-accepted %s' % num)
             try:
-                self.factory.on_accept(value)
+                self.factory.on_accept(num, value)
+            except (KeyAlreadyExists), e:
+                logging.warning('in factory.on_accept: %s' % e)
             except Exception:
                 logging.exception('in factory.on_accept')
             self.factory.last_accepted_iteration = num
@@ -329,29 +331,16 @@ class LockFactory(ClientFactory):
 
         self.disconnect()
 
-
     def add_callback(self, regex, callback):
         self.callbacks.append((re.compile(regex), callback))
 
-
     def remove_callback(self, callback):
         self.callbacks = filter(lambda x: x[1] != callback, self.callbacks)
-
 
     def find_callback(self, line):
         for regex, callback in self.callbacks:
             if regex.match(line) != None:
                 return callback
-
-
-    def get_key(self, key):
-        d = Deferred()
-        def cb():
-            if key not in self._keys:
-                raise KeyNotFound('Key "%s" not found' % key)
-            return self._keys[key]
-        d.addCallback(cb)
-        return d
 
     def get_status(self):
         """Returns a list of tuples (param_name, value)."""
@@ -364,6 +353,22 @@ class LockFactory(ClientFactory):
             ('num_connections', len(self.connections)),
         ]
 
+    def _start_paxos(self, value):
+        """ Start a new paxos iteration.
+        """
+        self.acceptor.max_seen_id += 1
+        proposer = PaxosProposer(self, self.acceptor.max_seen_id, value)
+        proposer.deferred.addCallback(lambda result: self.on_accept(*result))
+        return proposer.deferred
+
+    def get_key(self, key):
+        d = Deferred()
+        def cb():
+            if key not in self._keys:
+                raise KeyNotFound('Key "%s" not found' % key)
+            return self._keys[key]
+        d.addCallback(cb)
+        return d
 
     def set_key(self, key, value):
         #if key in self._keys:
@@ -372,23 +377,12 @@ class LockFactory(ClientFactory):
         value = 'set-key %s "%s"' % (key, escape(value))
         return self._start_paxos(value)
 
-
-    def _start_paxos(self, value):
-        """ Start a new paxos iteration.
-        """
-        self.acceptor.max_seen_id += 1
-        proposer = PaxosProposer(self, self.acceptor.max_seen_id, value)
-        proposer.deferred.addCallback(self.on_accept)
-        return proposer.deferred
-
-
     def del_key(self, key):
         #if key not in self._keys:
         #    raise KeyNotFound('Key "%s" not found' % key)
 
         value = 'del-key %s' % key
         return self._start_paxos(value)
-
 
     def add_connection(self, conn):
         self.connections[conn.other_side] = conn
@@ -398,7 +392,6 @@ class LockFactory(ClientFactory):
             for waiter in self._connection_waiters:
                 waiter.callback(True)
             self._connection_waiters = []
-
 
     def remove_connection(self, conn):
         for key, value in self.connections.items():
@@ -413,7 +406,6 @@ class LockFactory(ClientFactory):
                 del self.connections[key]
                 break
 
-
     def when_connected(self):
         d = Deferred()
         self._connection_waiters.append(d)
@@ -427,12 +419,10 @@ class LockFactory(ClientFactory):
         self._sync_completion_waiters.append(d)
         return d
 
-
     def disconnect(self):
         for conn in self._all_connections:
             if conn.connected:
                 conn.transport.loseConnection()
-
 
     def startFactory(self):
         self.log.info('callWhen running %s:%s' % (self.interface, self.port))
@@ -458,13 +448,11 @@ class LockFactory(ClientFactory):
             finally:
                 self._reconnecting = False
 
-
     def startedConnecting(self, connector):
         self.log.info('Started to connect to another server: %s:%s' % (
             connector.host,
             connector.port
         ))
-
 
     def buildProtocol(self, addr):
         conn = addr.host, addr.port
@@ -481,7 +469,6 @@ class LockFactory(ClientFactory):
             self.log.info('Connection from another server accepted: %s:%s' % conn)
         return result
 
-
     def clientConnectionFailed(self, connector, reason):
         self.log.info('Connection to %s:%s failed. Reason: %s' % (
             connector.host,
@@ -489,14 +476,12 @@ class LockFactory(ClientFactory):
             reason
         ))
 
-
     def broadcast(self, line):
         for connection in self.connections.values():
             connection.sendLine(line)
         return len(self.connections)
 
-
-    def on_accept(self, value):
+    def on_accept(self, num, value):
         logging.info('factory.on_accept %s' % (value,))
         self.master = (self.interface, self.port)
         self._log.append(value)
@@ -505,7 +490,6 @@ class LockFactory(ClientFactory):
         cmd = getattr(self, command)
         return cmd(*splitted[1:])
 
-
     def _log_cmd_set_key(self, key, value):
         if key in self._keys:
             raise KeyAlreadyExists('Key "%s" already exists' % key)
@@ -513,13 +497,11 @@ class LockFactory(ClientFactory):
         self._keys[key] = value
         return value
 
-
     def _log_cmd_del_key(self, key):
         if key not in self._keys:
             raise KeyNotFound('Key "%s" not found' % key)
 
         return self._keys.pop(key)
-
 
     def get_stale(self):
         """ Shows if this node is stale and should be synced. """

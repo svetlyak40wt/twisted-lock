@@ -11,12 +11,16 @@ from twisted.internet.task import deferLater
 from twisted.internet.defer import inlineCallbacks, gatherResults
 from twisted.web.http import EXPECTATION_FAILED, OK
 from StringIO import StringIO
+from ConfigParser import ConfigParser
 
 from .. lock import LockFactory, LockProtocol
 from .. config import Config
 from .. utils import init_logging
 
 DelayedCall.debug = True
+logging_config = ConfigParser()
+logging_config.add_section('logging')
+logging_config.set('logging', 'filename', 'unittest.log')
 
 def cfg(text):
     config = Config()
@@ -28,7 +32,7 @@ class TestCase(unittest.TestCase):
     num_nodes = 3
 
     def __init__(self, *args, **kwargs):
-        init_logging()
+        init_logging(logging_config)
         self.client = Agent(reactor)
 
         base_cfg = '''
