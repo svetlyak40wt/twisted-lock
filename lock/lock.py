@@ -107,11 +107,16 @@ class PaxosProposer(object):
         self.log.debug('on_accepted accept_responses=%s, threshold=%s' % (self.accept_responses, threshold))
         if self.accept_responses >= threshold:
             #self.factory.remove_callback(self.on_accepted)
+            self.factory.broadcast('paxos-learn %s "%s"' % (
+                self.number,
+                escape(self.value),
+            ))
 
-            if not self.accept_timeout.cancelled:
-                self.log.debug('accept_timeout canceled.')
-                self.accept_timeout.cancel()
-                self.deferred.callback((number, self.value))
+    def learn(self, value):
+        if value == self.value:
+            self.deferred.callback((number, self.value))
+        else:
+            self.fail('different value "%s" was choosen' % value)
 
     def fail(self, reason = None):
         self.log.warning('Paxos iteration failed (reason=%r)' % reason)
@@ -145,19 +150,26 @@ class PaxosAcceptor(object):
         logging.info('%s on_accept %s' % (num, value))
         num = int(num)
         last_accepted_iteration = int(last_accepted_iteration)
-        if self.factory.last_accepted_iteration < last_accepted_iteration:
-            self.factory.set_stale(True)
+
+        if num >= self.max_seen_id:
+            # Reply only if we don't participate in paxos
+            # with higher number
+            if self.factory.last_accepted_iteration < last_accepted_iteration:
+                self.factory.set_stale(True)
+            else:
+                self.factory.set_stale(False)
+                self._add_value(int(num), value)
+                client.sendLine('paxos-accepted %s' % num)
+                # TODO call on_accept
+                #try:
+                #    self.factory.on_accept(num, value)
+                #except (KeyAlreadyExists), e:
+                #    logging.warning('in factory.on_accept: %s' % e)
+                #except Exception:
+                #    logging.exception('in factory.on_accept')
+                self.factory.last_accepted_iteration = num
         else:
-            self.factory.set_stale(False)
-            self._add_value(int(num), value)
-            client.sendLine('paxos-accepted %s' % num)
-            try:
-                self.factory.on_accept(num, value)
-            except (KeyAlreadyExists), e:
-                logging.warning('in factory.on_accept: %s' % e)
-            except Exception:
-                logging.exception('in factory.on_accept')
-            self.factory.last_accepted_iteration = num
+            logging.warning('Won\'t accept %s iteration because already seen %s.' % (num, self.max_seen_id))
 
     def _find_value(self, num, default = None):
         """ Searches value for iteration `num` if it was
@@ -305,6 +317,10 @@ class LockFactory(ClientFactory):
         self.last_accepted_iteration = 0
         self.state = []
         self.callbacks = []
+        # map paxos-id -> proposer
+        self._proposers = {}
+
+        self.add_callback('^paxos-learn .*$', self.on_learn)
 
         self.acceptor = PaxosAcceptor(self)
         self.replicator = Syncronizer(self)
@@ -359,7 +375,9 @@ class LockFactory(ClientFactory):
         """
         self.acceptor.max_seen_id += 1
         proposer = PaxosProposer(self, self.acceptor.max_seen_id, value)
-        proposer.deferred.addCallback(lambda result: self.on_accept(*result))
+        # TODO Call on_accept
+        #proposer.deferred.addCallback(lambda result: self.on_accept(*result))
+        self._proposers[self.acceptor.max_seen_id] = proposer
         return proposer.deferred
 
     def get_key(self, key):
@@ -485,14 +503,25 @@ class LockFactory(ClientFactory):
             connection.sendLine(line)
         return len(self.connections)
 
-    def on_accept(self, num, value):
-        logging.info('factory.on_accept %s' % (value,))
+
+    def on_learn(self, num, value, client = None):
+        logging.info('factory.on_learn %s' % (value,))
         self.master = (self.interface, self.port)
         self._log.append(value)
+
         splitted = shlex.split(value)
-        command = '_log_cmd_' + splitted[0].replace('-', '_')
+        command_name, args = splitted[0], splitted[1:]
+
+        command = '_log_cmd_' + command_name.replace('-', '_')
         cmd = getattr(self, command)
-        return cmd(*splitted[1:])
+
+        proposer = self._proposers.get(int(num))
+
+        if proposer is not None:
+            try:
+                proposer.learn(cmd(*args))
+            except Exception, e:
+                proposer.fail('command "%s" failed: %s' % (command_name, e))
 
     def _log_cmd_set_key(self, key, value):
         if key in self._keys:
