@@ -48,6 +48,7 @@ class Paxos(object):
 
     def paxos_learn(self, num, value, client):
         num = int(num)
+        self.id = num
         self.transport.learn(num, value)
 
     def _send_to(self, client, message):

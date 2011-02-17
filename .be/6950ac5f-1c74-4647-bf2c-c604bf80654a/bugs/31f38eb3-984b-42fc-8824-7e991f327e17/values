@@ -4,14 +4,14 @@ creator: Alexander Artemenko <svetlyak.40wt@gmail.com>
 reporter: Alexander Artemenko <svetlyak.40wt@gmail.com>
 
 
-severity: minor
+severity: critical
 
 
-status: closed
+status: open
 
 
-summary: Add a consistency stress-test.
+summary: Use defereds in new Paxos class.
 
 
-time: Sat, 22 Jan 2011 11:18:52 +0000
+time: Thu, 17 Feb 2011 17:00:26 +0000
 
