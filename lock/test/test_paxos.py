@@ -1,27 +1,16 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
 
+import random
+import time
+
 from twisted.trial import unittest
-from twisted.internet.defer import inlineCallbacks, Deferred
+from twisted.internet.defer import inlineCallbacks
 from twisted.internet import reactor
-from random import random
 
-from ..paxos import Paxos, ConflictError
-
-
-def _wait(predicate):
-    """Async waiter for predicate.
-    Returns deferred and will call callback
-    when predicate() will return true.
-    """
-    d = Deferred()
-    def _wait():
-        if predicate():
-            d.callback(True)
-        else:
-            reactor.callLater(0.1, _wait)
-    reactor.callLater(0.1, _wait)
-    return d
+from ..paxos import Paxos, PrepareTimeout
+from ..utils import wait_calls
+from itertools import chain
 
 
 class Network(object):
@@ -38,7 +27,15 @@ class Network(object):
         self.log.append((num, value))
 
     def wait_delayed_calls(self):
-        return _wait(lambda: all((c.cancelled or c.called) for c in self._delayed_calls))
+        return wait_calls(
+            lambda: all(
+                (c is None or c.cancelled or c.called)
+                for c in chain(
+                    self._delayed_calls,
+                    *(tr.paxos._get_timeouts() for tr in self.transports)
+                )
+            )
+        )
 
 
 class Transport(object):
@@ -57,7 +54,7 @@ class Transport(object):
     def send(self, message, from_transport):
         print '%s sending "%s" to %s' % (from_transport.id, message, self.id)
         self.network._delayed_calls.append(
-            reactor.callLater(random(), self.paxos.recv, message, from_transport)
+            reactor.callLater(random.random(), self.paxos.recv, message, from_transport)
         )
 
     @property
@@ -67,10 +64,18 @@ class Transport(object):
 
 class PaxosTests(unittest.TestCase):
     def setUp(self):
+        self.seed = int(time.time())
+        random.seed(self.seed)
+        print 'Random seed: %s' % self.seed
+
         self.net = Network()
         self.net.transports = [Transport(i, self.net) for i in xrange(5)]
         for tr in self.net.transports:
             tr.paxos = Paxos(tr)
+
+    def tearDown(self):
+        for tr in self.net.transports:
+            tr.paxos._cancel_timeouts()
 
     @inlineCallbacks
     def test_basic(self):
@@ -100,7 +105,7 @@ class PaxosTests(unittest.TestCase):
         a = yield self.net.transports[0].paxos.propose('blah')
 
         # Waiting when paxos on node 1 will learn the new value
-        yield _wait(lambda: self.net.transports[1].paxos.id == 1)
+        yield wait_calls(lambda: self.net.transports[1].paxos.id == 1)
         b = yield self.net.transports[1].paxos.propose('minor')
 
         yield self.net.wait_delayed_calls()
@@ -124,8 +129,8 @@ class PaxosTests(unittest.TestCase):
 
         def _run_second_round():
             def check_fail(result):
-                self.assertEqual(ConflictError, result)
-                second_round_failed[0] = True
+                if result.value == PrepareTimeout:
+                    second_round_failed[0] = True
 
             d2 = self.net.transports[1].paxos.propose('minor')
             d2.addBoth(check_fail)

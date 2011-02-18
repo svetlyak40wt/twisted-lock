@@ -1,22 +1,42 @@
 import shlex
 
 from twisted.internet.defer import Deferred
+from twisted.internet import base
+from twisted.internet import reactor
 from collections import deque
 
+base.DelayedCall.debug = True
 
-class ConflictError(RuntimeError):
+class PaxosError(RuntimeError):
+    pass
+
+class PrepareTimeout(PaxosError):
+    pass
+
+class AcceptTimeout(PaxosError):
     pass
 
 
+def _stop_waiting(timeout):
+    if timeout is not None and not (timeout.called or timeout.cancelled):
+        timeout.cancel()
+
+
 class Paxos(object):
-    def __init__(self, transport):
+    def __init__(self, transport, quorum_timeout=2):
         self.transport = transport
+        self.quorum_timeout = quorum_timeout
+
         self.id = 0
         self.max_seen_id = 0
 
         self.proposed_value = None
         self.deferred = None
         self.queue = deque() # queue of (value, deferred) to propose
+
+        # delayed calls for timeouts
+        self._accepted_timeout = None
+        self._acks_timeout = None
 
     def recv(self, message, client):
         message = shlex.split(message)
@@ -38,6 +58,12 @@ class Paxos(object):
         self.deferred = deferred
 
         self._num_acks_to_wait = self.transport.quorum_size
+
+        def _timeout_callback():
+            print '+++ prepare timeout'
+            self.deferred.errback(PrepareTimeout)
+
+        self._acks_timeout = reactor.callLater(self.quorum_timeout, _timeout_callback)
         self.transport.broadcast('paxos_prepare %s' % self.id)
 
     def paxos_prepare(self, num, client):
@@ -51,7 +77,18 @@ class Paxos(object):
         if num == self.id:
             self._num_acks_to_wait -= 1
             if self._num_acks_to_wait == 0:
+                _stop_waiting(self._acks_timeout)
+
                 self._num_accepts_to_wait = self.transport.quorum_size
+
+                def _timeout_callback():
+                    print '+++ accept timeout'
+                    self.deferred.errback(AcceptTimeout)
+
+                self._accepted_timeout = reactor.callLater(
+                    self.quorum_timeout,
+                    _timeout_callback
+                )
                 self.transport.broadcast('paxos_accept %s "%s"' % (self.id, self.proposed_value))
 
     def paxos_accept(self, num, value, client):
@@ -64,6 +101,7 @@ class Paxos(object):
         if num == self.id:
             self._num_accepts_to_wait -= 1
             if self._num_accepts_to_wait == 0:
+                _stop_waiting(self._accepted_timeout)
                 self.transport.broadcast('paxos_learn %s "%s"' % (self.id, self.proposed_value))
 
     def paxos_learn(self, num, value, client):
@@ -86,4 +124,14 @@ class Paxos(object):
 
     def _send_to(self, client, message):
         client.send(message, self.transport)
+
+    def _get_timeouts(self):
+        return [
+            self._accepted_timeout,
+            self._acks_timeout,
+        ]
+
+    def _cancel_timeouts(self):
+        for timeout in self._get_timeouts():
+            _stop_waiting(timeout)
 

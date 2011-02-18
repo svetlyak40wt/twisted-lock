@@ -5,6 +5,9 @@ import types
 
 from functools import wraps
 
+from twisted.internet.defer import Deferred
+from twisted.internet import reactor
+
 def parse_ip(text):
     text = text.strip()
     if ':' in text:
@@ -57,4 +60,22 @@ def trace_all(cls):
                 setattr(cls, key, trace(value))
     return cls
 
+
 escape = lambda x: x.replace('\\', '\\\\').replace('"', '\\"')
+
+
+def wait_calls(predicate, check_step = 0.1):
+    """Async waiter for predicate.
+    Returns deferred and will call callback
+    when predicate() will return true.
+    """
+    d = Deferred()
+    def _wait():
+        if predicate():
+            d.callback(True)
+        else:
+            reactor.callLater(check_step, _wait)
+    reactor.callLater(check_step, _wait)
+    return d
+
+
