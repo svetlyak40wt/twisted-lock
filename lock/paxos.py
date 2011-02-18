@@ -1,5 +1,13 @@
 import shlex
 
+from twisted.internet.defer import Deferred
+from collections import deque
+
+
+class ConflictError(RuntimeError):
+    pass
+
+
 class Paxos(object):
     def __init__(self, transport):
         self.transport = transport
@@ -7,6 +15,8 @@ class Paxos(object):
         self.max_seen_id = 0
 
         self.proposed_value = None
+        self.deferred = None
+        self.queue = deque() # queue of (value, deferred) to propose
 
     def recv(self, message, client):
         message = shlex.split(message)
@@ -14,8 +24,18 @@ class Paxos(object):
         command(client=client, *message[1:])
 
     def propose(self, value):
+        deferred = Deferred()
+        if self.proposed_value is None:
+            self._start_paxos(value, deferred)
+            return deferred
+        else:
+            self.queue.append((value, deferred))
+
+    def _start_paxos(self, value, deferred):
+        """Starts paxos iteration proposing given value."""
         self.id += 1
         self.proposed_value = value
+        self.deferred = deferred
 
         self._num_acks_to_wait = self.transport.quorum_size
         self.transport.broadcast('paxos_prepare %s' % self.id)
@@ -50,6 +70,19 @@ class Paxos(object):
         num = int(num)
         self.id = num
         self.transport.learn(num, value)
+        if self.deferred is not None and \
+                self.proposed_value == value:
+
+            self.deferred.callback((num, value))
+
+            if self.queue:
+                # start new Paxos instance
+                # for next value from the queue
+                next_value, deferred = self.queue.pop()
+                self._start_paxos(next_value, deferred)
+            else:
+                self.proposed_value = None
+                self.deferred = None
 
     def _send_to(self, client, message):
         client.send(message, self.transport)
