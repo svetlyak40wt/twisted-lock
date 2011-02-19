@@ -25,6 +25,7 @@ class Network(object):
 
     def learn(self, num, value):
         self.log.append((num, value))
+        return (num, value)
 
     def wait_delayed_calls(self):
         return wait_calls(
@@ -48,9 +49,6 @@ class Transport(object):
         print '%s broadcasting "%s"' % (self.id, message)
         return self.network.broadcast(message, self)
 
-    def learn(self, num, value):
-        self.network.learn(num, value)
-
     def send(self, message, from_transport):
         print '%s sending "%s" to %s' % (from_transport.id, message, self.id)
         self.network._delayed_calls.append(
@@ -71,7 +69,7 @@ class PaxosTests(unittest.TestCase):
         self.net = Network()
         self.net.transports = [Transport(i, self.net) for i in xrange(5)]
         for tr in self.net.transports:
-            tr.paxos = Paxos(tr)
+            tr.paxos = Paxos(tr, on_learn=self.net.learn)
 
     def tearDown(self):
         for tr in self.net.transports:

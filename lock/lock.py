@@ -18,9 +18,10 @@ from twisted.internet.defer import Deferred
 from twisted.python import failure
 from twisted.web import server
 
-from . utils import parse_ip, parse_ips, escape
-from . exceptions import KeyAlreadyExists, KeyNotFound, PaxosFailed
-from . web import Root
+from .utils import parse_ip, parse_ips, escape
+from .exceptions import KeyAlreadyExists, KeyNotFound, PaxosFailed
+from .web import Root
+from .paxos import Paxos
 
 
 def stop_waiting(timeout):
@@ -253,17 +254,21 @@ class LockProtocol(LineReceiver):
 
     def lineReceived(self, line):
         self.log.info('RECV: ' + line)
-        parsed = shlex.split(line)
-        command = parsed[0]
-        args = parsed[1:]
-        try:
-            cmd = getattr(self, 'cmd_' + command)
-        except:
-            cmd = self.factory.find_callback(line)
-            if cmd is None:
-                raise RuntimeError('Unknown command "%s"' % command)
+        self.factory.paxos.recv(line, self)
+        #parsed = shlex.split(line)
+        #command = parsed[0]
+        #args = parsed[1:]
+        #try:
+        #    cmd = getattr(self, 'cmd_' + command)
+        #except:
+        #    cmd = self.factory.find_callback(line)
+        #    if cmd is None:
+        #        raise RuntimeError('Unknown command "%s"' % command)
 
-        cmd(client = self, *args)
+        #cmd(client = self, *args)
+
+    def send(self, line, transport):
+        self.sendLine(line)
 
 
     def sendLine(self, line):
@@ -280,8 +285,10 @@ class LockFactory(ClientFactory):
     protocol = LockProtocol
 
     def __init__(self, config):
+        self.paxos = Paxos(self, self.learn)
+
         interface, port = parse_ip(config.get('myself', 'listen', '4001'))
-        server_list = parse_ips(config.get('cluster', 'nodes', '127.0.0.1:4001'))
+        self.neighbours = parse_ips(config.get('cluster', 'nodes', '127.0.0.1:4001'))
         self._first_connect_delay = float(config.get('cluster', 'first_connect_delay', 0))
 
         self.port = port
@@ -299,10 +306,6 @@ class LockFactory(ClientFactory):
 
         self.connections = {}
         self._all_connections = []
-        self.neighbours = [
-            conn for conn in server_list
-            if conn != (self.interface, self.port)
-        ]
 
         # list of deferreds to be called when
         # connections with all other nodes will be established
@@ -394,14 +397,14 @@ class LockFactory(ClientFactory):
         #    raise KeyAlreadyExists('Key "%s" already exists' % key)
 
         value = 'set-key %s "%s"' % (key, escape(value))
-        return self._start_paxos(value)
+        return self.paxos.propose(value)
 
     def del_key(self, key):
         #if key not in self._keys:
         #    raise KeyNotFound('Key "%s" not found' % key)
 
         value = 'del-key %s' % key
-        return self._start_paxos(value)
+        return self.paxos.propose(value)
 
     def add_connection(self, conn):
         self.connections[conn.other_side] = conn
@@ -498,11 +501,37 @@ class LockFactory(ClientFactory):
             reason
         ))
 
+
+    # BEGIN Paxos Transport methods
     def broadcast(self, line):
         for connection in self.connections.values():
             connection.sendLine(line)
         return len(self.connections)
 
+    @property
+    def quorum_size(self):
+        return max(2, len(self.connections)/ 2 + 1)
+
+    def learn(self, num, value):
+        """First callback in the paxos result accepting chain."""
+        logging.info('factory.learn %s' % (value,))
+
+        self.master = (self.interface, self.port)
+        self._log.append(value)
+
+        splitted = shlex.split(value)
+        command_name, args = splitted[0], splitted[1:]
+
+        command = '_log_cmd_' + command_name.replace('-', '_')
+        cmd = getattr(self, command)
+
+        try:
+            return cmd(*args)
+        except Exception, e:
+            logging.exception('command "%s" failed' % command_name)
+            raise
+
+    # END Paxos Transport methods
 
     def on_learn(self, num, value, client = None):
         logging.info('factory.on_learn %s' % (value,))

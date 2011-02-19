@@ -15,7 +15,9 @@ from twisted.internet.defer import inlineCallbacks, returnValue
 from twisted.python.log import err
 from twisted.python.failure import Failure
 
-from . exceptions import KeyAlreadyExists, KeyNotFound, PaxosFailed
+from . exceptions import KeyAlreadyExists, KeyNotFound
+from .paxos import PaxosError
+
 
 def _get_key_from_path(path):
     return path[1:]
@@ -25,6 +27,7 @@ def long_call(secs):
     def cb():
         return 'Long Call Result'
     return deferLater(reactor, secs, cb)
+
 
 def delayed(func):
     func = inlineCallbacks(func)
@@ -92,7 +95,7 @@ class Root(resource.Resource):
             yield self._lock.set_key(key, '')
         except KeyAlreadyExists:
             request.setResponseCode(CONFLICT)
-        except PaxosFailed:
+        except PaxosError:
             request.setResponseCode(EXPECTATION_FAILED)
 
 
@@ -104,7 +107,7 @@ class Root(resource.Resource):
             yield self._lock.del_key(key)
         except KeyNotFound:
             request.setResponseCode(NOT_FOUND)
-        except PaxosFailed:
+        except PaxosError:
             request.setResponseCode(EXPECTATION_FAILED)
 
 

@@ -5,6 +5,8 @@ from twisted.internet import base
 from twisted.internet import reactor
 from collections import deque
 
+from .utils import escape
+
 base.DelayedCall.debug = True
 
 class PaxosError(RuntimeError):
@@ -23,8 +25,9 @@ def _stop_waiting(timeout):
 
 
 class Paxos(object):
-    def __init__(self, transport, quorum_timeout=2):
+    def __init__(self, transport, on_learn, quorum_timeout=2):
         self.transport = transport
+        self.on_learn = on_learn
         self.quorum_timeout = quorum_timeout
 
         self.id = 0
@@ -61,7 +64,7 @@ class Paxos(object):
 
         def _timeout_callback():
             print '+++ prepare timeout'
-            self.deferred.errback(PrepareTimeout)
+            self.deferred.errback(PrepareTimeout())
 
         self._acks_timeout = reactor.callLater(self.quorum_timeout, _timeout_callback)
         self.transport.broadcast('paxos_prepare %s' % self.id)
@@ -83,13 +86,13 @@ class Paxos(object):
 
                 def _timeout_callback():
                     print '+++ accept timeout'
-                    self.deferred.errback(AcceptTimeout)
+                    self.deferred.errback(AcceptTimeout())
 
                 self._accepted_timeout = reactor.callLater(
                     self.quorum_timeout,
                     _timeout_callback
                 )
-                self.transport.broadcast('paxos_accept %s "%s"' % (self.id, self.proposed_value))
+                self.transport.broadcast('paxos_accept %s "%s"' % (self.id, escape(self.proposed_value)))
 
     def paxos_accept(self, num, value, client):
         num = int(num)
@@ -102,16 +105,18 @@ class Paxos(object):
             self._num_accepts_to_wait -= 1
             if self._num_accepts_to_wait == 0:
                 _stop_waiting(self._accepted_timeout)
-                self.transport.broadcast('paxos_learn %s "%s"' % (self.id, self.proposed_value))
+                self.transport.broadcast('paxos_learn %s "%s"' % (self.id, escape(self.proposed_value)))
 
     def paxos_learn(self, num, value, client):
         num = int(num)
         self.id = num
-        self.transport.learn(num, value)
+
+        result = self.on_learn(num, value)
+
         if self.deferred is not None and \
                 self.proposed_value == value:
 
-            self.deferred.callback((num, value))
+            self.deferred.callback(result)
 
             if self.queue:
                 # start new Paxos instance
