@@ -2,6 +2,8 @@
 from __future__ import absolute_import
 
 import re
+import random
+import time
 
 from twisted.trial import unittest
 from twisted.web.client import Agent
@@ -22,6 +24,12 @@ logging_config = ConfigParser()
 logging_config.add_section('logging')
 logging_config.set('logging', 'filename', '')
 
+def seed(value):
+    def decorator(func):
+        func._random_seed = value
+        return func
+    return decorator
+
 def cfg(text):
     config = Config()
     config.readfp(StringIO(text))
@@ -30,6 +38,7 @@ def cfg(text):
 
 class TestCase(unittest.TestCase):
     num_nodes = 3
+    timeout = 15
 
     def __init__(self, *args, **kwargs):
         init_logging(logging_config)
@@ -64,6 +73,19 @@ listen = %s
             setattr(self, 's%s' % (x+1), s)
             self.servers.append(s)
         self.addCleanup(self._close_servers)
+
+    def _run(self, method_name, result):
+        method = getattr(self, method_name)
+        seed = getattr(method, '_random_seed', int(time.time()))
+        random.seed(seed)
+
+        def seed_info_adder(failure):
+            failure.value.args = (failure.value.args[0] + ' (random seed: %s)' % seed,) + failure.value.args[1:]
+            return failure
+
+        d = super(TestCase, self)._run(method_name, result)
+        d.addErrback(seed_info_adder)
+        return d
 
     def _close_servers(self):
         for server in self.servers:
@@ -152,8 +174,22 @@ class Disconnections(TestCase):
     num_nodes = 5
 
     @inlineCallbacks
-    def _run_disconnection_test(self):
-        """ Adds three keys into the cluster. """
+    def _run_disconnection_test(
+        self,
+        expected_s2_log=[
+            'set-key blah ""',
+            'set-key minor ""',
+            'set-key again ""',
+        ],
+        expected_s3_log=[
+            'set-key again ""',
+        ],
+    ):
+        """Adds three keys into the cluster:
+            - blah
+            - minor
+            - again
+        """
         yield self.wait_when_connection_establied()
 
         result = yield self.client.request(
@@ -182,16 +218,18 @@ class Disconnections(TestCase):
         self._assert_servers_consistency('blah', 'minor', 'again')
 
         # full log here
-        self.assertEqual(
-            [
-                'set-key blah ""',
-                'set-key minor ""',
-                'set-key again ""',
-            ],
-            self.s2._log
-        )
+        self.assertEqual(expected_s2_log, self.s2._log)
         # last command only, because this node received a snapshot
-        self.assertEqual(['set-key again ""'], self.s3._log)
+        self.assertEqual(expected_s3_log, self.s3._log)
+
+    @inlineCallbacks
+    def test_no_connection_errors(self):
+        expected_log = [
+            'set-key blah ""',
+            'set-key minor ""',
+            'set-key again ""',
+        ]
+        yield self._run_disconnection_test(expected_log, expected_log)
 
     @inlineCallbacks
     def test_connection_lost_during_accept(self):
@@ -202,7 +240,7 @@ class Disconnections(TestCase):
                 self.s3.disconnect()
 
         LockProtocol.send_line_hooks = [(
-            re.compile(r'^paxos-accept 1 .*'), drop_connection)]
+            re.compile(r'^paxos_accept 1 .*'), drop_connection)]
         yield self._run_disconnection_test()
 
     @inlineCallbacks
@@ -213,9 +251,9 @@ class Disconnections(TestCase):
                 LockProtocol.send_line_hooks = []
                 self.s3.disconnect()
 
-        LockProtocol.send_line_hooks = [(
-            re.compile('^paxos-prepare 1$'), drop_connection)]
 
+        LockProtocol.send_line_hooks = [(
+            re.compile('^paxos_prepare 1$'), drop_connection)]
         yield self._run_disconnection_test()
 
     @inlineCallbacks
@@ -237,7 +275,6 @@ class Disconnections(TestCase):
         self.assertEqual(False, self.s3.get_stale())
         self.assertEqual(['set-key and-one-more ""'], self.s3._log)
 
-
     @inlineCallbacks
     def _add_key(self, key):
         result = yield self.client.request(
@@ -257,7 +294,6 @@ class Disconnections(TestCase):
                 except Exception, e:
                     e.args = ('In %s server: ' % (x + 1) + e.args[0],)
                     raise
-
 
 
 # какие могут быть тесты

@@ -127,6 +127,18 @@ class Paxos(object):
                 self.proposed_value = None
                 self.deferred = None
 
+    def get_state(self):
+        """Used to serialize paxos state for node sync."""
+        return dict(
+            id=self.id,
+            max_seen_id=self.max_seen_id,
+        )
+
+    def set_state(self, data):
+        """Used to restore paxos state during node sync."""
+        self.id = data['id']
+        self.max_seen_id = data['max_seen_id']
+
     def _send_to(self, client, message):
         client.send(message, self.transport)
 
@@ -139,4 +151,3 @@ class Paxos(object):
     def _cancel_timeouts(self):
         for timeout in self._get_timeouts():
             _stop_waiting(timeout)
-

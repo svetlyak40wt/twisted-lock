@@ -127,7 +127,7 @@ class PaxosTests(unittest.TestCase):
 
         def _run_second_round():
             def check_fail(result):
-                if result.value == PrepareTimeout:
+                if isinstance(result.value, PrepareTimeout):
                     second_round_failed[0] = True
 
             d2 = self.net.transports[1].paxos.propose('minor')
