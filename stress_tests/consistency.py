@@ -59,52 +59,6 @@ def stop(servers):
         server.wait()
 
 
-def lock(key, worker):
-    logger.debug('locking %r' % (key,))
-    url = 'http://127.0.0.1:900%d/%s?w=%s' % (choose_server(worker), key, worker)
-    request = PostRequest(url)
-    num_retries = 10
-    sleep_between = 1
-
-    while num_retries > 0:
-        try:
-            result = urllib2.urlopen(request)
-        except urllib2.HTTPError, e:
-            logger.error('lock HTTPError: %s, key %r' % (e, key))
-            if e.code in (409, 417): # key already exists or paxos failed, retry
-                num_retries -= 1
-                time.sleep(sleep_between)
-                sleep_between *= 2
-            else:
-                break
-        else:
-            return True
-    return False
-
-
-def unlock(key, worker):
-    logger.debug('unlocking %r' % (key,))
-    url = 'http://127.0.0.1:900%d/%s?w=%s' % (choose_server(worker), key, worker)
-    request = DeleteRequest(url)
-    num_retries = 10
-    sleep_between = 1
-
-    while num_retries > 0:
-        try:
-            result = urllib2.urlopen(request)
-            return
-        except urllib2.HTTPError, e:
-            logger.error('unlock HTTPError: %s, key %r' % (e, key))
-            if e.code == 417: # paxos failed, retry
-                num_retries -= 1
-                time.sleep(sleep_between)
-                sleep_between *= 2
-            else:
-                logger.critical('unlock failed because exception')
-                raise
-    logger.critical('unlock failed after retries')
-
-
 def compare_logs():
     data = defaultdict(list)
     for x in range(1, NUM_SERVERS+1):
@@ -126,12 +80,19 @@ def compare_logs():
                 log
             ))
 
+class Worker(threading.Thread):
+    # reference lock state
+    _keys = {}
+    _lock = threading.Lock()
 
-def test():
-    d = defaultdict(list)
+    def __init__(self, id_, data):
+        super(Worker, self).__init__()
+        self.id = id_
+        self.d = data
+        self.iter = 0
 
-    def worker(worker_id):
-        with StderrHandler(format_string='[{record.time}] {record.level_name} [%s] {record.message}' % worker_id).threadbound():
+    def run(self):
+        with StderrHandler(format_string='[{record.time}] {record.level_name} [%s] {record.message}' % self.id).threadbound():
             iterations_left = NUM_ITERATIONS
             num_fails_in_sequence = 0
 
@@ -140,7 +101,7 @@ def test():
                 locked = []
                 for data_id in range(NUM_DATA_SLOTS):
                     key = 'key-%d' % data_id
-                    if lock(key, worker_id):
+                    if self.lock(key):
                         locked.append(key)
                     else:
                         break
@@ -148,7 +109,7 @@ def test():
                 if len(locked) == NUM_DATA_SLOTS:
                     num_fails_in_sequence = 0
                     for data_id in range(NUM_DATA_SLOTS):
-                        d[data_id].append(worker_id)
+                        self.d[data_id].append(self.id)
                     iterations_left -= 1
                 else:
                     num_fails_in_sequence += 1
@@ -160,17 +121,96 @@ def test():
 
                 # release the locks
                 for key in reversed(locked):
-                    unlock(key, worker_id)
+                    self.unlock(key)
 
-                time.sleep(random.random() * 0.1)
+                time.sleep(random.random())
 
             logger.debug('exit from the worker, locals=%r' % (locals(),))
 
+    def lock(self, key):
+        num_retries = 10
 
-    threads = [
-        threading.Thread(target = worker, args = (worker_id,))
-        for worker_id in range(NUM_WORKERS)
-    ]
+        while num_retries > 0:
+            try:
+                self.iter += 1
+                logger.debug('locking %r (iter=%s)' % (key, self.iter))
+                request = PostRequest(
+                    'http://127.0.0.1:900%d/%s?w=%s&i=%s' % (choose_server(self.id), key, self.id, self.iter)
+                )
+                result = urllib2.urlopen(request)
+            except urllib2.HTTPError, e:
+                logger.error('lock HTTPError: %s, key %r, retries left %s' % (e, key, num_retries))
+                if e.code in (409, 417): # key already exists or paxos failed, retry
+                    num_retries -= 1
+                    time.sleep(random.random())
+                else:
+                    break
+            except urllib2.URLError, e:
+                logger.error('lock URLError: %s, key %r, retries left %s' % (e, key, num_retries))
+                num_retries -= 1
+                time.sleep(random.random())
+            else:
+                # check if we lock right
+                with self._lock:
+                    if key in self._keys:
+                        if self._keys[key] == self.id:
+                            logger.critical('################## key %s already locked by me' % (key, ))
+                        else:
+                            logger.critical('------------------ key %s already locked by worker %s' % (key, self._keys[key]))
+                    else:
+                        self._keys[key] = self.id
+
+                logger.debug('locked %r' % (key,))
+
+                return True
+        return False
+
+    def unlock(self, key):
+        num_retries = 10
+
+        while num_retries > 0:
+            try:
+                self.iter += 1
+                logger.debug('unlocking %r (iter=%s)' % (key, self.iter))
+                request = DeleteRequest(
+                    'http://127.0.0.1:900%d/%s?w=%s&i=%s' % (choose_server(self.id), key, self.id, self.iter)
+                )
+                result = urllib2.urlopen(request)
+
+                with self._lock:
+                    if key in self._keys:
+                        if self._keys[key] != self.id:
+                            logger.critical('++++++++++++++++++ key %s was locked by worker %s' % (key, self._keys[key]))
+                        del self._keys[key]
+                    else:
+                        logger.critical('================== key %s was unlocked by another worker' % (key, ))
+
+                logger.debug('unlocked %r' % (key,))
+                return
+            except urllib2.HTTPError, e:
+                logger.error('unlock HTTPError: %s, key %r, retries left %s' % (e, key, num_retries))
+                if e.code == 417: # paxos failed, retry
+                    num_retries -= 1
+                    time.sleep(random.random())
+                else:
+                    logger.critical('unlock failed because exception')
+                    raise
+            except urllib2.URLError, e:
+                logger.error('lock URLError: %s, key %r, retries left %s' % (e, key, num_retries))
+                num_retries -= 1
+                time.sleep(random.random())
+        logger.critical('unlock failed after retries')
+        raise
+
+
+def test():
+    d = defaultdict(list)
+    seed = int(time.time())
+    print 'RANDOM SEED: %s' % seed
+    random.seed(seed)
+
+    threads = [Worker(worker_id, d) for worker_id in range(1, NUM_WORKERS+1)]
+
     for thread in threads:
         thread.start()
     for thread in threads:
