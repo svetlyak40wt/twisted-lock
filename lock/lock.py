@@ -387,7 +387,7 @@ class LockFactory(ClientFactory):
         try:
             return cmd(*args)
         except Exception, e:
-            logging.exception('command "%s" failed' % command_name)
+            logging.error('command "%s" failed: %s' % (command_name, e))
             raise
 
     # END Paxos Transport methods

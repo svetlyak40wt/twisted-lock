@@ -40,6 +40,7 @@ class Paxos(object):
         # delayed calls for timeouts
         self._accepted_timeout = None
         self._acks_timeout = None
+        self._waiting_for_result = False
 
     def recv(self, message, client):
         message = shlex.split(message)
@@ -64,7 +65,10 @@ class Paxos(object):
 
         def _timeout_callback():
             print '+++ prepare timeout'
+            # TODO sometimes self.deferred is None when this callbach is called
             self.deferred.errback(PrepareTimeout())
+            self.deferred = None
+            self.proposed_value = None
 
         self._acks_timeout = reactor.callLater(self.quorum_timeout, _timeout_callback)
         self.transport.broadcast('paxos_prepare %s' % self.id)
@@ -77,7 +81,7 @@ class Paxos(object):
 
     def paxos_ack(self, num, client):
         num = int(num)
-        if num == self.id:
+        if self.proposed_value is not None and num == self.id:
             self._num_acks_to_wait -= 1
             if self._num_acks_to_wait == 0:
                 _stop_waiting(self._acks_timeout)
@@ -87,6 +91,8 @@ class Paxos(object):
                 def _timeout_callback():
                     print '+++ accept timeout'
                     self.deferred.errback(AcceptTimeout())
+                    self.deferred = None
+                    self.proposed_value = None
 
                 self._accepted_timeout = reactor.callLater(
                     self.quorum_timeout,
@@ -101,22 +107,28 @@ class Paxos(object):
 
     def paxos_accepted(self, num, client):
         num = int(num)
-        if num == self.id:
+        if self.proposed_value is not None and num == self.id:
             self._num_accepts_to_wait -= 1
             if self._num_accepts_to_wait == 0:
                 _stop_waiting(self._accepted_timeout)
                 self.transport.broadcast('paxos_learn %s "%s"' % (self.id, escape(self.proposed_value)))
+                self._waiting_for_result = True
 
     def paxos_learn(self, num, value, client):
         num = int(num)
         self.id = num
 
-        result = self.on_learn(num, value)
+        try:
+            result = self.on_learn(num, value)
+        except Exception, e:
+            result = e
 
-        if self.deferred is not None and \
-                self.proposed_value == value:
-
-            self.deferred.callback(result)
+        if self._waiting_for_result:
+            self._waiting_for_result = False
+            if isinstance(result, Exception):
+                self.deferred.errback(result)
+            else:
+                self.deferred.callback(result)
 
             if self.queue:
                 # start new Paxos instance
