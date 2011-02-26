@@ -232,9 +232,10 @@ class LockFactory(ClientFactory):
             ('bind', '%s:%s' % (self.interface, self.port)),
             ('master', self.master),
             ('stale', self._stale),
-            ('max_seen_id', self.acceptor.max_seen_id),
-            ('last_accepted_id', self.last_accepted_iteration),
+            ('current_id', self.paxos.id),
+            ('max_seen_id', self.paxos.max_seen_id),
             ('num_connections', len(self.connections)),
+            ('quorum_size', self.quorum_size),
         ]
 
     def get_key(self, key):
