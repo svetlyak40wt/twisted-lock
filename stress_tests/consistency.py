@@ -1,10 +1,12 @@
 #!/usr/bin/env python
+from __future__ import with_statement
 
 import subprocess
 import threading
 import time
 import random
 import urllib2
+import socket
 
 from collections import defaultdict
 from itertools import izip
@@ -18,6 +20,7 @@ NUM_ITERATIONS = 10
 RANDOM_SERVER = True
 
 logger = Logger()
+socket.setdefaulttimeout(5)
 
 class PostRequest(urllib2.Request):
     def get_method(self):
