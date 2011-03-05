@@ -5,7 +5,6 @@ import re
 import random
 import time
 
-from twisted.trial import unittest
 from twisted.web.client import Agent
 from twisted.internet import reactor
 from twisted.internet.base import DelayedCall
@@ -18,17 +17,14 @@ from ConfigParser import ConfigParser
 from .. lock import LockFactory, LockProtocol
 from .. config import Config
 from .. utils import init_logging
+from . import TestCase as BaseTestCase
 
 DelayedCall.debug = True
 logging_config = ConfigParser()
 logging_config.add_section('logging')
-logging_config.set('logging', 'filename', '')
-
-def seed(value):
-    def decorator(func):
-        func._random_seed = value
-        return func
-    return decorator
+logging_config.set('logging', 'filename', 'unittest.log')
+logging_config.add_section('myself')
+logging_config.set('myself', 'listen', '0')
 
 def cfg(text):
     config = Config()
@@ -36,7 +32,7 @@ def cfg(text):
     return config
 
 
-class TestCase(unittest.TestCase):
+class TestCase(BaseTestCase):
     num_nodes = 3
     timeout = 15
 
@@ -121,13 +117,24 @@ class Simple(TestCase):
 
 class Replication(TestCase):
     @inlineCallbacks
+    def test_status(self):
+        yield self.wait_when_connection_establied()
+        server = self.s1
+        self.assertEqual(None, server.master)
+        result = yield self.client.request(
+            'GET',
+            'http://%s:%s/info/status' % (server.http_interface, server.http_port)
+        )
+        self.assertEqual(OK, result.code)
+
+    @inlineCallbacks
     def test_node_become_a_master(self):
         yield self.wait_when_connection_establied()
         server = self.s1
         self.assertEqual(None, server.master)
         result = yield self.client.request(
             'POST',
-            'http://%s:%s/blah' % (server.http_interface, server.http_port)
+            'http://%s:%s/blah?data=some-data' % (server.http_interface, server.http_port)
         )
         self.assertEqual((server.interface, server.port), server.master)
 

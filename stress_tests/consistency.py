@@ -1,12 +1,13 @@
 #!/usr/bin/env python
 from __future__ import with_statement
 
+import random
+import socket
 import subprocess
+import sys
 import threading
 import time
-import random
 import urllib2
-import socket
 
 from collections import defaultdict
 from itertools import izip
@@ -17,7 +18,7 @@ NUM_SERVERS = 5
 NUM_WORKERS = 4
 NUM_DATA_SLOTS = 2
 NUM_ITERATIONS = 10
-RANDOM_SERVER = True
+RANDOM_SERVER = False
 
 logger = Logger()
 socket.setdefaulttimeout(5)
@@ -33,7 +34,7 @@ class DeleteRequest(urllib2.Request):
 
 
 _server_distribution = dict(
-    (worker_id, worker_id+1)#random.randint(1, NUM_SERVERS))
+    (worker_id, worker_id)#random.randint(1, NUM_SERVERS))
     for worker_id in range(NUM_SERVERS)
 )
 
@@ -54,8 +55,9 @@ def run_servers():
 
 def stop(servers):
     for server in servers:
-        server.terminate()
-    for server in servers:
+        server.send_signal(9)
+    for idx, server in enumerate(servers):
+        logger.info('Waiting for server %s' % idx)
         server.wait()
 
 
@@ -65,7 +67,7 @@ def compare_logs():
         log = urllib2.urlopen('http://127.0.0.1:900%d/info/log' % x).read()
         log = '\n'.join(
             '%3d %s' % (lineno+1, line)
-            for lineno, line in enumerate(log.split('\n'))
+            for lineno, line in filter(None, enumerate(log.split('\n')))
         )
         data[log].append(x)
         with open('/tmp/%s' % x, 'w') as f:
@@ -73,12 +75,22 @@ def compare_logs():
 
     if len(data) == 1:
         logger.info('Logs are equal')
+        return 0
     else:
         for log, servers in data.iteritems():
             logger.error('Log from servers %s:\n%s' % (
                 ', '.join(map(str, servers)),
                 log
             ))
+        return 8
+
+
+def print_server_status():
+    for x in range(1, NUM_SERVERS+1):
+        status = urllib2.urlopen('http://127.0.0.1:900%d/info/status' % x).read()
+        keys = urllib2.urlopen('http://127.0.0.1:900%d/info/keys' % x).read()
+        logger.info('Server%s:\n%s\n%s' % (x, status, keys))
+
 
 class Worker(threading.Thread):
     # reference lock state
@@ -92,7 +104,7 @@ class Worker(threading.Thread):
         self.iter = 0
 
     def run(self):
-        with StderrHandler(format_string='[{record.time}] {record.level_name} [%s] {record.message}' % self.id).threadbound():
+        with StderrHandler(format_string='[{record.time}] {record.level_name:>5} [%s] {record.message}' % self.id).threadbound():
             iterations_left = NUM_ITERATIONS
             num_fails_in_sequence = 0
 
@@ -111,6 +123,7 @@ class Worker(threading.Thread):
                     for data_id in range(NUM_DATA_SLOTS):
                         self.d[data_id].append(self.id)
                     iterations_left -= 1
+                    logger.info('decrement: locked=%r' % (locked,))
                 else:
                     num_fails_in_sequence += 1
                     if num_fails_in_sequence > NUM_ITERATIONS * NUM_DATA_SLOTS * NUM_WORKERS:
@@ -135,7 +148,7 @@ class Worker(threading.Thread):
                 self.iter += 1
                 logger.debug('locking %r (iter=%s)' % (key, self.iter))
                 request = PostRequest(
-                    'http://127.0.0.1:900%d/%s?w=%s&i=%s' % (choose_server(self.id), key, self.id, self.iter)
+                    'http://127.0.0.1:900%d/%s?data=%s-%s' % (choose_server(self.id), key, self.id, self.iter)
                 )
                 result = urllib2.urlopen(request)
             except urllib2.HTTPError, e:
@@ -154,9 +167,9 @@ class Worker(threading.Thread):
                 with self._lock:
                     if key in self._keys:
                         if self._keys[key] == self.id:
-                            logger.critical('################## key %s already locked by me' % (key, ))
+                            logger.warning('################## key %s already locked by me' % (key, ))
                         else:
-                            logger.critical('------------------ key %s already locked by worker %s' % (key, self._keys[key]))
+                            logger.warning('------------------ key %s already locked by worker %s' % (key, self._keys[key]))
                     else:
                         self._keys[key] = self.id
 
@@ -173,17 +186,17 @@ class Worker(threading.Thread):
                 self.iter += 1
                 logger.debug('unlocking %r (iter=%s)' % (key, self.iter))
                 request = DeleteRequest(
-                    'http://127.0.0.1:900%d/%s?w=%s&i=%s' % (choose_server(self.id), key, self.id, self.iter)
+                    'http://127.0.0.1:900%d/%s?data=%s-%s' % (choose_server(self.id), key, self.id, self.iter)
                 )
                 result = urllib2.urlopen(request)
 
                 with self._lock:
                     if key in self._keys:
                         if self._keys[key] != self.id:
-                            logger.critical('++++++++++++++++++ key %s was locked by worker %s' % (key, self._keys[key]))
+                            logger.warning('++++++++++++++++++ key %s was locked by worker %s' % (key, self._keys[key]))
                         del self._keys[key]
                     else:
-                        logger.critical('================== key %s was unlocked by another worker' % (key, ))
+                        logger.warning('================== key %s was unlocked by another worker' % (key, ))
 
                 logger.debug('unlocked %r' % (key,))
                 return
@@ -209,7 +222,35 @@ def test():
     print 'RANDOM SEED: %s' % seed
     random.seed(seed)
 
+    def watch_on_progress():
+        done = len(d[0])
+        total = NUM_ITERATIONS * NUM_WORKERS
+        bar_length = 40
+        previous_progress = 0
+        time_since_progress = time.time()
+        STUCK_TIME_LIMIT = 60
+
+        while done < total:
+            done = len(d[0])
+            progress = float(done) / total
+            if progress > previous_progress:
+                logger.info(
+                    'Progress: %.1f%% [%s%s]' % (
+                        progress * 100,
+                        '#' * int(bar_length * progress),
+                        ' ' * (bar_length - int(bar_length * progress)),
+                    )
+                )
+                previous_progress = progress
+                time_since_progress = time.time()
+            else:
+                if time.time() - time_since_progress > STUCK_TIME_LIMIT:
+                    logger.critical('Progress stuck on %s%%' % (progress * 100))
+                    return
+            time.sleep(1)
+
     threads = [Worker(worker_id, d) for worker_id in range(1, NUM_WORKERS+1)]
+    threads.append(threading.Thread(target=watch_on_progress))
 
     for thread in threads:
         thread.start()
@@ -217,11 +258,17 @@ def test():
         thread.join()
 
     logger.info('Checking the data.')
+
+    # Give servers a chance to finish processes
+    time.sleep(5)
+
     if not d:
         logger.error('Data dict is empty.')
 
+    result = 0
     for key, value in d.iteritems():
         if len(value) != NUM_ITERATIONS * NUM_WORKERS:
+            result |= 2
             logger.error('Wrong data count for key "%s": %s, should be %s' % (
                 key,
                 len(value),
@@ -232,9 +279,15 @@ def test():
     # All rows should have the only on worker's id
     for row in data:
         if len(set(row)) != 1:
-            logger.error('Bad data raw: %r' % (row,))
+            logger.error('Bad data row: %r' % (row,))
+            result |= 4
 
-    compare_logs()
+    result |= compare_logs()
+
+    if result != 0:
+        print_server_status()
+
+    return result
 
 
 def main():
@@ -243,13 +296,14 @@ def main():
 
     time.sleep(10)
     try:
-        test()
+        return test()
     except Exception, e:
         logger.exception('Test failed: %s' % e)
-
-    logger.info('Stopping')
-    stop(servers)
+        return 1
+    finally:
+        logger.info('Stopping')
+        stop(servers)
 
 if __name__ == '__main__':
     with StderrHandler(format_string='[{record.time}] {record.level_name} {record.message}').applicationbound():
-        main()
+        sys.exit(main())

@@ -2,18 +2,19 @@
 from __future__ import absolute_import
 
 import re
-import logging
 import shlex
 import random
 import pickle
 import base64
 
+from bisect import insort
 from operator import itemgetter
 from twisted.internet.protocol import ClientFactory
 from twisted.protocols.basic import LineReceiver
 from twisted.internet import reactor
 from twisted.internet.defer import Deferred
 from twisted.web import server
+from logbook import Logger
 
 from .utils import parse_ip, parse_ips, escape
 from .exceptions import KeyAlreadyExists, KeyNotFound
@@ -102,7 +103,7 @@ class LockProtocol(LineReceiver):
     @property
     def log(self):
         if self._log is None:
-            self._log = logging.getLogger('lockprotocol.%s' % self.factory.port)
+            self._log = Logger('lockprotocol')
         return self._log
 
     def connectionMade(self):
@@ -166,7 +167,7 @@ class LockFactory(ClientFactory):
         # this flag is used to prevent recursion in _reconnect method
         self._reconnecting = False
 
-        self.log = logging.getLogger('lockfactory.%s' % self.port)
+        self.log = Logger('lockfactory')
 
         self.connections = {}
         self._all_connections = []
@@ -178,8 +179,11 @@ class LockFactory(ClientFactory):
         self._sync_completion_waiters = []
 
         # state
+        self._epoch = 0 # received commands counter
         self._log = []
-        self._epoch = 0
+        # a buffer for learn commands if they come out of order.
+        self._learn_queue = []
+        # actual data storage
         self._keys = {}
         # last successful Paxos ID
         self.last_accepted_iteration = 0
@@ -236,6 +240,8 @@ class LockFactory(ClientFactory):
             ('max_seen_id', self.paxos.max_seen_id),
             ('num_connections', len(self.connections)),
             ('quorum_size', self.quorum_size),
+            ('log_size', len(self._log)),
+            ('epoch', self._epoch),
         ]
 
     def get_key(self, key):
@@ -372,7 +378,7 @@ class LockFactory(ClientFactory):
 
     def learn(self, num, value):
         """First callback in the paxos result accepting chain."""
-        logging.info('factory.learn %s' % (value,))
+        self.log.info('factory.learn %s %s' % (len(self._log) + 1, value))
 
         self.master = (self.interface, self.port)
         self._log.append(value)
@@ -387,7 +393,7 @@ class LockFactory(ClientFactory):
         try:
             return cmd(*args)
         except Exception, e:
-            logging.error('command "%s" failed: %s' % (command_name, e))
+            self.log.error('command "%s" failed: %s' % (command_name, e))
             raise
 
     # END Paxos Transport methods
@@ -400,22 +406,26 @@ class LockFactory(ClientFactory):
         """
         line, epoch = line.rsplit(' ', 1)
         epoch = int(epoch)
-        if epoch > self._epoch:
-            self.set_stale(True)
-        else:
-            self.set_stale(False)
-            self.paxos.recv(line, client)
+        insort(self._learn_queue, (epoch, line))
+
+        while self._learn_queue and self._learn_queue[0][0] == self._epoch:
+            self.paxos.recv(self._learn_queue.pop(0)[1], client)
+        #if epoch - self._epoch > 5:
+        #    self.set_stale(True)
+        #else:
+        #    self.set_stale(False)
+        #    self.paxos.recv(line, client)
 
     def _log_cmd_set_key(self, key, value):
         if key in self._keys:
-            raise KeyAlreadyExists('Key "%s" already exists' % key)
+            raise KeyAlreadyExists('Key %s=%r already exists' % (key, self._keys[key]))
 
         self._keys[key] = value
         return value
 
     def _log_cmd_del_key(self, key):
         if key not in self._keys:
-            raise KeyNotFound('Key "%s" not found' % key)
+            raise KeyNotFound('Key %s not found' % key)
 
         return self._keys.pop(key)
 

@@ -4,13 +4,14 @@ from __future__ import absolute_import
 import random
 import time
 
-from twisted.trial import unittest
 from twisted.internet.defer import inlineCallbacks
 from twisted.internet import reactor
-
-from ..paxos import Paxos, PrepareTimeout
-from ..utils import wait_calls
 from itertools import chain
+
+from ..paxos import Paxos, PrepareTimeout, AcceptTimeout
+from ..utils import wait_calls
+from . import TestCase as BaseTestCase
+from . import seed
 
 
 class Network(object):
@@ -44,6 +45,7 @@ class Transport(object):
         self.id = id
         self.network = network
         self.paxos = None
+        self.log = []
 
     def broadcast(self, message):
         print '%s broadcasting "%s"' % (self.id, message)
@@ -55,21 +57,21 @@ class Transport(object):
             reactor.callLater(random.random(), self.paxos.recv, message, from_transport)
         )
 
+    def learn(self, num, value):
+        self.log.append((num, value))
+        return self.network.learn(num, value)
+
     @property
     def quorum_size(self):
         return max(3, len(self.network.transports)/ 2 + 1)
 
 
-class PaxosTests(unittest.TestCase):
+class PaxosTests(BaseTestCase):
     def setUp(self):
-        self.seed = int(time.time())
-        random.seed(self.seed)
-        print 'Random seed: %s' % self.seed
-
         self.net = Network()
         self.net.transports = [Transport(i, self.net) for i in xrange(5)]
         for tr in self.net.transports:
-            tr.paxos = Paxos(tr, on_learn=self.net.learn)
+            tr.paxos = Paxos(tr, on_learn=tr.learn)
 
     def tearDown(self):
         for tr in self.net.transports:
@@ -103,7 +105,7 @@ class PaxosTests(unittest.TestCase):
         a = yield self.net.transports[0].paxos.propose('blah')
 
         # Waiting when paxos on node 1 will learn the new value
-        yield wait_calls(lambda: self.net.transports[1].paxos.id == 1)
+        yield wait_calls(lambda: self.net.transports[1].log == [(1, 'blah')])
         b = yield self.net.transports[1].paxos.propose('minor')
 
         yield self.net.wait_delayed_calls()
@@ -117,8 +119,11 @@ class PaxosTests(unittest.TestCase):
     def test_two_proposes_from_different_nodes_simultaneously(self):
         self.assertEqual([], self.net.log)
 
+        first_round_failed = [False]
+
         def check_success(result):
-            self.assertEqual((1, 'blah'), result)
+            if hasattr(result, 'value') and isinstance(result.value, AcceptTimeout):
+                first_round_failed[0] = True
 
         d1 = self.net.transports[0].paxos.propose('blah')
         d1.addBoth(check_success)
@@ -127,7 +132,7 @@ class PaxosTests(unittest.TestCase):
 
         def _run_second_round():
             def check_fail(result):
-                if isinstance(result.value, PrepareTimeout):
+                if hasattr(result, 'value') and isinstance(result.value, PrepareTimeout):
                     second_round_failed[0] = True
 
             d2 = self.net.transports[1].paxos.propose('minor')
@@ -139,9 +144,16 @@ class PaxosTests(unittest.TestCase):
 
         # additional check if check_fail function
         # was really called
-        self.assertEqual(True, second_round_failed[0])
-        self.assertEqual(
-            [(1, 'blah')] * 5,
-            self.net.log
-        )
+        if first_round_failed[0]:
+            self.assertEqual(
+                [(2, 'minor')] * 5,
+                self.net.log
+            )
+        elif second_round_failed[0]:
+            self.assertEqual(
+                [(1, 'blah')] * 5,
+                self.net.log
+            )
+        else:
+            raise RuntimeError('one round should be failed')
 

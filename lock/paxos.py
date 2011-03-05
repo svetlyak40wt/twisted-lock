@@ -4,19 +4,27 @@ from twisted.internet.defer import Deferred
 from twisted.internet import base
 from twisted.internet import reactor
 from collections import deque
+from logbook import Logger
 
 from .utils import escape
 
 base.DelayedCall.debug = True
+logger = Logger('paxos')
 
 class PaxosError(RuntimeError):
     pass
 
 class PrepareTimeout(PaxosError):
-    pass
+    def __init__(self):
+        super(PrepareTimeout, self).__init__('Prepare timeout')
 
 class AcceptTimeout(PaxosError):
-    pass
+    def __init__(self):
+        super(AcceptTimeout, self).__init__('Accept timeout')
+
+class LearnError(PaxosError):
+    def __init__(self):
+        super(LearnError, self).__init__('Learned value from old iteration')
 
 
 def _stop_waiting(timeout):
@@ -40,7 +48,7 @@ class Paxos(object):
         # delayed calls for timeouts
         self._accepted_timeout = None
         self._acks_timeout = None
-        self._waiting_for_result = False
+        self._waiting_for_result = None
 
     def recv(self, message, client):
         message = shlex.split(message)
@@ -51,20 +59,26 @@ class Paxos(object):
         deferred = Deferred()
         if self.proposed_value is None:
             self._start_paxos(value, deferred)
-            return deferred
         else:
             self.queue.append((value, deferred))
+            logger.debug('Request for %s was queued, queue size is %s (because we are proposing %s now)' % (
+                    value,
+                    len(self.queue),
+                    self.proposed_value,
+                )
+            )
+        return deferred
 
     def _start_paxos(self, value, deferred):
         """Starts paxos iteration proposing given value."""
-        self.id += 1
+        self.id = self.max_seen_id + 1
         self.proposed_value = value
         self.deferred = deferred
 
         self._num_acks_to_wait = self.transport.quorum_size
 
         def _timeout_callback():
-            print '+++ prepare timeout'
+            logger.info('+++ prepare timeout')
             # TODO sometimes self.deferred is None when this callbach is called
             self.deferred.errback(PrepareTimeout())
             self.deferred = None
@@ -89,7 +103,7 @@ class Paxos(object):
                 self._num_accepts_to_wait = self.transport.quorum_size
 
                 def _timeout_callback():
-                    print '+++ accept timeout'
+                    logger.info('+++ accept timeout')
                     self.deferred.errback(AcceptTimeout())
                     self.deferred = None
                     self.proposed_value = None
@@ -112,32 +126,53 @@ class Paxos(object):
             if self._num_accepts_to_wait == 0:
                 _stop_waiting(self._accepted_timeout)
                 self.transport.broadcast('paxos_learn %s "%s"' % (self.id, escape(self.proposed_value)))
-                self._waiting_for_result = True
+                self._waiting_for_result = num
 
     def paxos_learn(self, num, value, client):
+        logger.info('paxos.learn %s' % value)
+
         num = int(num)
-        self.id = num
+        if num == self.max_seen_id:
+            try:
+                result = self.on_learn(num, value)
+            except Exception, e:
+                logger.exception('paxos.learn %s' % value)
+                result = e
 
-        try:
-            result = self.on_learn(num, value)
-        except Exception, e:
-            result = e
+            if self._waiting_for_result == num:
+                self._waiting_for_result = None
+                if isinstance(result, Exception):
+                    logger.warning('returning error from paxos.learn %s, %s' % (value, result))
+                    self.deferred.errback(result)
+                else:
+                    logger.warning('returning success from paxos.learn %s' % value)
+                    self.deferred.callback(result)
 
-        if self._waiting_for_result:
-            self._waiting_for_result = False
-            if isinstance(result, Exception):
-                self.deferred.errback(result)
-            else:
-                self.deferred.callback(result)
+                logger.debug('queue size: %s' % len(self.queue))
+                if self.queue:
+                    # start new Paxos instance
+                    # for next value from the queue
+                    next_value, deferred = self.queue.pop()
+                    logger.debug('next value from the queue: %s' % value)
+                    self._start_paxos(next_value, deferred)
+                else:
+                    self.proposed_value = None
+                    self.deferred = None
+        else:
+            logger.debug('learned value from old iteration')
+            if self.deferred is not None:
+                self.deferred.errback(LearnError())
 
             if self.queue:
                 # start new Paxos instance
                 # for next value from the queue
                 next_value, deferred = self.queue.pop()
+                logger.debug('next value from the queue: %s' % value)
                 self._start_paxos(next_value, deferred)
             else:
                 self.proposed_value = None
                 self.deferred = None
+
 
     def get_state(self):
         """Used to serialize paxos state for node sync."""
