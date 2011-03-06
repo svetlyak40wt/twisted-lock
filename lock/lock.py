@@ -98,6 +98,7 @@ class LockProtocol(LineReceiver):
 
     def __init__(self):
         self.other_side = (None, None)
+        self.http = (None, None)
         self._log = None
 
     @property
@@ -107,7 +108,10 @@ class LockProtocol(LineReceiver):
         return self._log
 
     def connectionMade(self):
-        pass
+        self.sendLine('params %s %s' % (
+            self.factory.http_interface,
+            self.factory.http_port,
+        ))
 
     def connectionLost(self, reason):
         self.factory.remove_connection(self)
@@ -115,11 +119,16 @@ class LockProtocol(LineReceiver):
     def lineReceived(self, line):
         self.log.info('RECV: ' + line)
 
-        cmd = self.factory.find_callback(line)
-        if cmd is None:
-            raise RuntimeError('Unknown command "%s"' % line)
+        if line.startswith('params '):
+            args = line.split()[1:]
+            self.http = args[0], int(args[1])
+
         else:
-            cmd(line, client=self)
+            cmd = self.factory.find_callback(line)
+            if cmd is None:
+                raise RuntimeError('Unknown command "%s"' % line)
+            else:
+                cmd(line, client=self)
 
         #parsed = shlex.split(line)
         #command = parsed[0]
@@ -150,7 +159,7 @@ class LockFactory(ClientFactory):
     protocol = LockProtocol
 
     def __init__(self, config):
-        self.paxos = Paxos(self, self.learn)
+        self.paxos = Paxos(self, on_learn=self.on_learn, on_prepare=self.on_prepare)
 
         interface, port = parse_ip(config.get('myself', 'listen', '4001'))
         self.neighbours = parse_ips(config.get('cluster', 'nodes', '127.0.0.1:4001'))
@@ -376,11 +385,10 @@ class LockFactory(ClientFactory):
     def quorum_size(self):
         return max(2, len(self.connections)/ 2 + 1)
 
-    def learn(self, num, value):
+    def on_learn(self, num, value):
         """First callback in the paxos result accepting chain."""
-        self.log.info('factory.learn %s %s' % (len(self._log) + 1, value))
+        self.log.info('factory.on_learn %s %s' % (len(self._log) + 1, value))
 
-        self.master = (self.interface, self.port)
         self._log.append(value)
         self._epoch += 1
 
@@ -395,6 +403,9 @@ class LockFactory(ClientFactory):
         except Exception, e:
             self.log.error('command "%s" failed: %s' % (command_name, e))
             raise
+
+    def on_prepare(self, num, client):
+        self.master = client
 
     # END Paxos Transport methods
 

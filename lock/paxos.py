@@ -33,9 +33,10 @@ def _stop_waiting(timeout):
 
 
 class Paxos(object):
-    def __init__(self, transport, on_learn, quorum_timeout=2):
+    def __init__(self, transport, on_learn, on_prepare = None, quorum_timeout=2):
         self.transport = transport
         self.on_learn = on_learn
+        self.on_prepare = on_prepare
         self.quorum_timeout = quorum_timeout
 
         self.id = 0
@@ -90,6 +91,9 @@ class Paxos(object):
     def paxos_prepare(self, num, client):
         num = int(num)
         if num > self.max_seen_id:
+            if self.on_prepare is not None:
+                self.on_prepare(num, client)
+
             self.max_seen_id = num
             self._send_to(client, 'paxos_ack %s' % num)
 

@@ -18,7 +18,7 @@ NUM_SERVERS = 5
 NUM_WORKERS = 4
 NUM_DATA_SLOTS = 2
 NUM_ITERATIONS = 10
-RANDOM_SERVER = False
+RANDOM_SERVER = True
 
 logger = Logger()
 socket.setdefaulttimeout(5)

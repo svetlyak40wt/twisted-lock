@@ -5,7 +5,7 @@ import re
 import random
 import time
 
-from twisted.web.client import Agent
+from twisted.web.client import Agent, getPage
 from twisted.internet import reactor
 from twisted.internet.base import DelayedCall
 from twisted.internet.task import deferLater
@@ -115,7 +115,7 @@ class Simple(TestCase):
         self.assertEqual(EXPECTATION_FAILED, result.code)
 
 
-class Replication(TestCase):
+class MasterLeases(TestCase):
     @inlineCallbacks
     def test_status(self):
         yield self.wait_when_connection_establied()
@@ -130,15 +130,47 @@ class Replication(TestCase):
     @inlineCallbacks
     def test_node_become_a_master(self):
         yield self.wait_when_connection_establied()
-        server = self.s1
-        self.assertEqual(None, server.master)
+
+        self.assertEqual(None, self.s2.master)
         result = yield self.client.request(
             'POST',
-            'http://%s:%s/blah?data=some-data' % (server.http_interface, server.http_port)
+            'http://%s:%s/blah?data=some-data' % (self.s1.http_interface, self.s1.http_port)
         )
-        self.assertEqual((server.interface, server.port), server.master)
+        expected = (self.s1.http_interface, self.s1.http_port)
+        self.assertEqual(expected, self.s1.master.http)
+        self.assertEqual(expected, self.s2.master.http)
+        self.assertEqual(expected, self.s3.master.http)
+
+    @inlineCallbacks
+    def test_requests_are_proxied_to_master(self):
+        yield self.wait_when_connection_establied()
+
+        proposers = set()
+
+        def save_proposer(conn, line):
+            proposers.add(conn.factory.port)
+
+        LockProtocol.send_line_hooks = [(
+            re.compile(r'^paxos_prepare.*'), save_proposer)]
+
+        result = yield self.client.request(
+            'POST',
+            'http://%s:%s/blah?data=some-data' % (self.s1.http_interface, self.s1.http_port)
+        )
+
+        result = yield self.client.request(
+            'POST',
+            'http://%s:%s/again?data=another-data' % (self.s2.http_interface, self.s2.http_port)
+        )
+
+        result = yield getPage(
+            'http://%s:%s/info/keys' % (self.s1.http_interface, self.s1.http_port)
+        )
+        self.assertEqual("{'blah': 'some-data', 'again': 'another-data'}\n", result)
+        self.assertEqual([4001], list(proposers))
 
 
+class Paxos(TestCase):
     @inlineCallbacks
     def test_data_replicated_to_all_nodes(self):
         yield self.wait_when_connection_establied()

@@ -1,12 +1,14 @@
 # -*- coding: utf-8 -*-
 from __future__ import absolute_import
 
+from urlparse import urlparse
 from functools import wraps
 
 from logbook import Logger
 from twisted.web import resource
 from twisted.web.http import CONFLICT, NOT_FOUND, INTERNAL_SERVER_ERROR, EXPECTATION_FAILED
 from twisted.web.server import NOT_DONE_YET
+from twisted.web.proxy import ProxyClientFactory
 from twisted.internet.task import deferLater
 from twisted.internet import reactor
 from twisted.internet.defer import inlineCallbacks, returnValue
@@ -32,12 +34,12 @@ def delayed(func):
 
     @wraps(func)
     def wrapper(self, request, *args, **kwargs):
-        finished = [False]
+        was_interrupted = [False]
         log = Logger('web')
 
         def on_cancel(failure):
             err(failure, 'Call to "%s" was interrupted' % request.path)
-            finished[0] = True
+            was_interrupted[0] = True
 
         request.notifyFinish().addErrback(on_cancel)
 
@@ -48,11 +50,12 @@ def delayed(func):
                 request.setResponseCode(INTERNAL_SERVER_ERROR)
                 log.exception('Call to %s(%r, args=%r, kwargs=%r) failed' % (func.__name__, request, args, kwargs), exc_info = (result.type, result.value, result.getTracebackObject()))
 
-            if finished[0] == False:
+            if was_interrupted[0] == False and result != NOT_DONE_YET:
                 request.finish()
 
         log.debug('Calling %s(%r, args=%r, kwargs=%r)' % (func.__name__, request, args, kwargs))
         d = func(self, request, *args, **kwargs)
+        log.debug('Result: %s' % d)
         log.debug('is returned deferred was called? %s' % d.called)
         d.addBoth(finish_request)
         return NOT_DONE_YET
@@ -91,16 +94,15 @@ class Root(resource.Resource):
     @delayed
     def render_POST(self, request):
         try:
-            self.log.debug('BLAH 1')
-            key = _get_key_from_path(request.path)
-            self.log.debug('BLAH 2')
-            data = request.args.get('data', [''])[0]
+            if self._lock.master is not None and \
+               self._lock.master.http != (self._lock.http_interface, self._lock.http_port):
+                returnValue(self._proxy(request))
+            else:
+                key = _get_key_from_path(request.path)
+                data = request.args.get('data', [''])[0]
 
-            self.log.debug('BLAH 3')
-            self.log.info('Set key %s=%r' % (key, data))
-            self.log.debug('BLAH 4')
-            yield self._lock.set_key(key, data)
-            self.log.debug('BLAH 5')
+                self.log.info('Set key %s=%r' % (key, data))
+                yield self._lock.set_key(key, data)
         except KeyAlreadyExists, e:
             self.log.warning(e)
             request.setResponseCode(CONFLICT)
@@ -126,4 +128,28 @@ class Root(resource.Resource):
         except Exception, e:
             self.log.exception('SOME OTHER EXCEPTION')
 
+
+    def _proxy(self, request):
+        """
+        Render a request by forwarding it to the proxied server.
+        """
+        # RFC 2616 tells us that we can omit the port if it's the default port,
+        # but we have to provide it otherwise
+        host, port = self._lock.master.http
+
+        request.received_headers['host'] = '%s:%s' % (host, port)
+        request.content.seek(0, 0)
+        qs = urlparse(request.uri)[4]
+        if qs:
+            rest = request.path + '?' + qs
+        else:
+            rest = request.path
+        self.log.debug('Proxing %s %s to the master at %s:%s' %
+            (request.method, rest, host, port)
+        )
+        clientFactory = ProxyClientFactory(
+            request.method, rest, request.clientproto,
+            request.getAllHeaders(), request.content.read(), request)
+        reactor.connectTCP(host, port, clientFactory)
+        return NOT_DONE_YET
 
