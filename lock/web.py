@@ -62,6 +62,18 @@ def delayed(func):
     return wrapper
 
 
+def proxy_to_master(func):
+    @wraps(func)
+    def wrapper(self, request, *args, **kwargs):
+        if self._lock.master is not None and \
+           self._lock.master.http != (self._lock.http_interface, self._lock.http_port):
+            returnValue(self._proxy(request))
+        else:
+            for value in func(self, request, *args, **kwargs):
+                yield value
+    return wrapper
+
+
 class Root(resource.Resource):
     isLeaf = True
 
@@ -92,17 +104,18 @@ class Root(resource.Resource):
 
 
     @delayed
+    @proxy_to_master
     def render_POST(self, request):
         try:
-            if self._lock.master is not None and \
-               self._lock.master.http != (self._lock.http_interface, self._lock.http_port):
-                returnValue(self._proxy(request))
-            else:
-                key = _get_key_from_path(request.path)
-                data = request.args.get('data', [''])[0]
+            #if self._lock.master is not None and \
+            #   self._lock.master.http != (self._lock.http_interface, self._lock.http_port):
+            #    returnValue(self._proxy(request))
+            #else:
+            key = _get_key_from_path(request.path)
+            data = request.args.get('data', [''])[0]
 
-                self.log.info('Set key %s=%r' % (key, data))
-                yield self._lock.set_key(key, data)
+            self.log.info('Set key %s=%r' % (key, data))
+            yield self._lock.set_key(key, data)
         except KeyAlreadyExists, e:
             self.log.warning(e)
             request.setResponseCode(CONFLICT)
