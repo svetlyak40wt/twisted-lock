@@ -67,10 +67,9 @@ def proxy_to_master(func):
     def wrapper(self, request, *args, **kwargs):
         if self._lock.master is not None and \
            self._lock.master.http != (self._lock.http_interface, self._lock.http_port):
-            returnValue(self._proxy(request))
+            return self._proxy(request)
         else:
-            for value in func(self, request, *args, **kwargs):
-                yield value
+            return func(self, request, *args, **kwargs)
     return wrapper
 
 
@@ -103,8 +102,8 @@ class Root(resource.Resource):
         returnValue('')
 
 
-    @delayed
     @proxy_to_master
+    @delayed
     def render_POST(self, request):
         try:
             #if self._lock.master is not None and \
@@ -126,6 +125,7 @@ class Root(resource.Resource):
             self.log.exception('SOME OTHER EXCEPTION')
 
 
+    @proxy_to_master
     @delayed
     def render_DELETE(self, request):
         key = _get_key_from_path(request.path)
