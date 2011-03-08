@@ -416,11 +416,14 @@ class LockFactory(ClientFactory):
         It strips the Epoch number from it and checks if this replica is stale.
         """
         line, epoch = line.rsplit(' ', 1)
-        epoch = int(epoch)
-        insort(self._learn_queue, (epoch, line))
+        self.paxos.recv(line, client)
 
-        while self._learn_queue and self._learn_queue[0][0] == self._epoch:
-            self.paxos.recv(self._learn_queue.pop(0)[1], client)
+        #epoch = int(epoch)
+        #insort(self._learn_queue, (epoch, line))
+
+        #while self._learn_queue and self._learn_queue[0][0] == self._epoch:
+        #    self.paxos.recv(self._learn_queue.pop(0)[1], client)
+
         #if epoch - self._epoch > 5:
         #    self.set_stale(True)
         #else:

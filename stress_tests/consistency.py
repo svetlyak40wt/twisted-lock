@@ -34,7 +34,7 @@ class DeleteRequest(urllib2.Request):
 
 
 _server_distribution = dict(
-    (worker_id, worker_id)#random.randint(1, NUM_SERVERS))
+    (worker_id, random.randint(1, NUM_SERVERS))
     for worker_id in range(NUM_SERVERS)
 )
 
@@ -43,23 +43,31 @@ def choose_server(worker_id):
         return _server_distribution[worker_id]
     return 1
 
+class Server(object):
+    def __init__(self, id_):
+        self.id = id_
+        self.config = 'stress_tests/configs/server%d.cfg' % id_
+        self.pid = None
 
-def run_servers():
-    results = []
-    for i in range(1, NUM_SERVERS + 1):
-        results.append(
-            subprocess.Popen(['./server.py', 'stress_tests/configs/server%d.cfg' % i])
-        )
-    return results
+    def start(self):
+        self.pid = subprocess.Popen(['./server.py', self.config])
+
+    def stop(self):
+        logger.info('Stopping server %s' % self.id)
+        if self.pid is not None:
+            self.pid.send_signal(9)
+            self.pid.wait()
+            self.pid = None
+
+
+def start_servers(servers):
+    for server in servers:
+        server.start()
 
 
 def stop(servers):
     for server in servers:
-        server.send_signal(9)
-    for idx, server in enumerate(servers):
-        logger.info('Waiting for server %s' % idx)
-        server.wait()
-
+        server.stop()
 
 def compare_logs():
     data = defaultdict(list)
@@ -292,7 +300,9 @@ def test():
 
 def main():
     logger.info('Starting')
-    servers = run_servers()
+
+    servers = [Server(i) for i in range(1, NUM_SERVERS + 1)]
+    start_servers(servers)
 
     time.sleep(10)
     try:
