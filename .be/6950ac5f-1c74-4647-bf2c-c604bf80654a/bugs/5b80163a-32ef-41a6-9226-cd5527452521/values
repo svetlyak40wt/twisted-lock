@@ -4,14 +4,14 @@ creator: Alexander Artemenko <svetlyak.40wt@gmail.com>
 reporter: Alexander Artemenko <svetlyak.40wt@gmail.com>
 
 
-severity: critical
+severity: minor
 
 
-status: closed
+status: open
 
 
-summary: Use defereds in new Paxos class.
+summary: Stop stressed servers on Ctrl-C.
 
 
-time: Thu, 17 Feb 2011 17:00:26 +0000
+time: Tue, 08 Mar 2011 07:56:45 +0000
 

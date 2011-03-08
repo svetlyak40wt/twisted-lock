@@ -1,0 +1,122 @@
+body {
+  font-family: "lucida grande", "sans serif";
+  color: #333;
+  width: auto;
+  margin: auto;
+}
+
+div.main {
+  padding: 20px;
+  margin: auto;
+  padding-top: 0;
+  margin-top: 1em;
+  background-color: #fcfcfc;
+}
+
+div.footer {
+  font-size: small;
+  padding-left: 20px;
+  padding-right: 20px;
+  padding-top: 5px;
+  padding-bottom: 5px;
+  margin: auto;
+  background: #305275;
+  color: #fffee7;
+}
+
+table {
+  border-style: solid;
+  border: 10px #313131;
+  border-spacing: 0;
+  width: auto;
+}
+
+tb { border: 1px; }
+
+tr {
+  vertical-align: top;
+  width: auto;
+}
+
+td {
+  border-width: 0;
+  border-style: none;
+  padding-right: 0.5em;
+  padding-left: 0.5em;
+  width: auto;
+}
+
+img { border-style: none; }
+
+h1 {
+  padding: 0.5em;
+  background-color: #305275;
+  margin-top: 0;
+  margin-bottom: 0;
+  color: #fff;
+  margin-left: -20px;
+  margin-right: -20px;
+}
+
+ul {
+  list-style-type: none;
+  padding: 0;
+}
+
+p { width: auto; }
+
+a, a:visited {
+  background: inherit;
+  text-decoration: none;
+}
+
+a { color: #003d41; }
+a:visited { color: #553d41; }
+.footer a { color: #508d91; }
+
+/* bug index pages */
+
+td.tab {
+  padding-right: 1em;
+  padding-left: 1em;
+}
+
+td.sel.tab {
+  background-color: #afafaf;
+  border: 1px solid #afafaf;
+  font-weight:bold;
+}
+
+td.nsel.tab { border: 0px; }
+
+table.bug_list {
+  background-color: #afafaf;
+  border: 2px solid #afafaf;
+}
+
+.bug_list tr { width: auto; }
+tr.wishlist { background-color: #B4FF9B; }
+tr.minor { background-color: #FCFF98; }
+tr.serious { background-color: #FFB648; }
+tr.critical { background-color: #FF752A; }
+tr.fatal { background-color: #FF3300; }
+
+/* bug detail pages */
+
+td.bug_detail_label { text-align: right; }
+td.bug_detail { }
+td.bug_comment_label { text-align: right; vertical-align: top; }
+td.bug_comment { }
+
+div.comment {
+  padding: 20px;
+  padding-top: 20px;
+  margin: auto;
+  margin-top: 0;
+}
+
+div.root.comment {
+  padding: 0px;
+  /* padding-top: 0px; */
+  padding-bottom: 20px;
+}

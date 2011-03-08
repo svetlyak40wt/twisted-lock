@@ -19,6 +19,8 @@ NUM_WORKERS = 4
 NUM_DATA_SLOTS = 2
 NUM_ITERATIONS = 10
 RANDOM_SERVER = True
+KILL_PROBABLITITY = 0.1
+STUCK_TIME_LIMIT = 60
 
 logger = Logger()
 socket.setdefaulttimeout(5)
@@ -43,6 +45,7 @@ def choose_server(worker_id):
         return _server_distribution[worker_id]
     return 1
 
+
 class Server(object):
     def __init__(self, id_):
         self.id = id_
@@ -50,11 +53,13 @@ class Server(object):
         self.pid = None
 
     def start(self):
-        self.pid = subprocess.Popen(['./server.py', self.config])
+        if self.pid is None:
+            logger.info('Starting server %s' % self.id)
+            self.pid = subprocess.Popen(['./server.py', self.config])
 
     def stop(self):
-        logger.info('Stopping server %s' % self.id)
         if self.pid is not None:
+            logger.info('Stopping server %s' % self.id)
             self.pid.send_signal(9)
             self.pid.wait()
             self.pid = None
@@ -105,18 +110,19 @@ class Worker(threading.Thread):
     _keys = {}
     _lock = threading.Lock()
 
-    def __init__(self, id_, data):
+    def __init__(self, id_, data, exit_event):
         super(Worker, self).__init__()
         self.id = id_
         self.d = data
         self.iter = 0
+        self.exit_event = exit_event
 
     def run(self):
         with StderrHandler(format_string='[{record.time}] {record.level_name:>5} [%s] {record.message}' % self.id).threadbound():
             iterations_left = NUM_ITERATIONS
             num_fails_in_sequence = 0
 
-            while iterations_left > 0:
+            while iterations_left > 0 and not self.exit_event.is_set():
                 # acquire the locks
                 locked = []
                 for data_id in range(NUM_DATA_SLOTS):
@@ -224,19 +230,18 @@ class Worker(threading.Thread):
         raise
 
 
-def test():
+def test(servers):
     d = defaultdict(list)
     seed = int(time.time())
     print 'RANDOM SEED: %s' % seed
     random.seed(seed)
 
-    def watch_on_progress():
+    def watch_on_progress(exit_event):
         done = len(d[0])
         total = NUM_ITERATIONS * NUM_WORKERS
         bar_length = 40
         previous_progress = 0
         time_since_progress = time.time()
-        STUCK_TIME_LIMIT = 60
 
         while done < total:
             done = len(d[0])
@@ -254,11 +259,33 @@ def test():
             else:
                 if time.time() - time_since_progress > STUCK_TIME_LIMIT:
                     logger.critical('Progress stuck on %s%%' % (progress * 100))
-                    return
+                    break
             time.sleep(1)
+        exit_event.set()
 
-    threads = [Worker(worker_id, d) for worker_id in range(1, NUM_WORKERS+1)]
-    threads.append(threading.Thread(target=watch_on_progress))
+
+    def killer():
+        """This thread kills random server at random time."""
+        while True:
+            time.sleep(random.randint(1, 5))
+
+            time_to_kill = random.random() < KILL_PROBABLITITY
+            if time_to_kill:
+                # kill someone
+                server = random.choice(servers)
+                server.stop()
+
+            # restore previously killed servers
+            for server in servers:
+                server.start()
+
+    exit_event = threading.Event()
+    threads = [Worker(worker_id, d, exit_event) for worker_id in range(1, NUM_WORKERS+1)]
+    threads.append(threading.Thread(target=watch_on_progress, args = (exit_event,)))
+
+    server_killer = threading.Thread(target=killer)
+    server_killer.daemon = True
+    server_killer.start()
 
     for thread in threads:
         thread.start()
@@ -306,7 +333,7 @@ def main():
 
     time.sleep(10)
     try:
-        return test()
+        return test(servers)
     except Exception, e:
         logger.exception('Test failed: %s' % e)
         return 1
