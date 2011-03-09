@@ -8,10 +8,12 @@ import sys
 import threading
 import time
 import urllib2
+import os
+import logbook
 
 from collections import defaultdict
 from itertools import izip
-from logbook import Logger, StderrHandler
+from logbook import Logger, StderrHandler, FileHandler, NestedSetup, NullHandler, Processor
 
 
 NUM_SERVERS = 5
@@ -118,7 +120,10 @@ class Worker(threading.Thread):
         self.exit_event = exit_event
 
     def run(self):
-        with StderrHandler(format_string='[{record.time}] {record.level_name:>5} [%s] {record.message}' % self.id).threadbound():
+        def inject_worker_id(record):
+            record.extra['worker_id'] = self.id
+
+        with Processor(inject_worker_id).threadbound():
             iterations_left = NUM_ITERATIONS
             num_fails_in_sequence = 0
 
@@ -248,7 +253,7 @@ def test(servers):
             progress = float(done) / total
             if progress > previous_progress:
                 logger.info(
-                    'Progress: %.1f%% [%s%s]' % (
+                    'Progress: %5.1f%% [%s%s]' % (
                         progress * 100,
                         '#' * int(bar_length * progress),
                         ' ' * (bar_length - int(bar_length * progress)),
@@ -269,33 +274,33 @@ def test(servers):
         while True:
             time.sleep(random.randint(1, 5))
 
+            # restore previously killed servers
+            for server in servers:
+                server.start()
+
             time_to_kill = random.random() < KILL_PROBABLITITY
             if time_to_kill:
                 # kill someone
                 server = random.choice(servers)
                 server.stop()
 
-            # restore previously killed servers
-            for server in servers:
-                server.start()
-
     exit_event = threading.Event()
     threads = [Worker(worker_id, d, exit_event) for worker_id in range(1, NUM_WORKERS+1)]
-    threads.append(threading.Thread(target=watch_on_progress, args = (exit_event,)))
 
     server_killer = threading.Thread(target=killer)
     server_killer.daemon = True
     server_killer.start()
 
     for thread in threads:
+        thread.daemon = True
         thread.start()
-    for thread in threads:
-        thread.join()
 
-    logger.info('Checking the data.')
+    watch_on_progress(exit_event)
 
     # Give servers a chance to finish processes
     time.sleep(5)
+
+    logger.info('Checking the data.')
 
     if not d:
         logger.error('Data dict is empty.')
@@ -329,6 +334,7 @@ def main():
     logger.info('Starting')
 
     servers = [Server(i) for i in range(1, NUM_SERVERS + 1)]
+
     start_servers(servers)
 
     time.sleep(10)
@@ -342,5 +348,17 @@ def main():
         stop(servers)
 
 if __name__ == '__main__':
-    with StderrHandler(format_string='[{record.time}] {record.level_name} {record.message}').applicationbound():
+    format = '[{record.time}] {record.level_name:>5} [{record.extra[worker_id]}] {record.message}'
+
+    logging_setup = NestedSetup([
+        NullHandler(),
+        FileHandler(
+            filename=os.path.join(os.path.dirname(__file__), 'log/client.log'),
+            format_string=format,
+            bubble=True,
+        ),
+        StderrHandler(level=logbook.INFO, format_string=format, bubble=True),
+    ])
+
+    with logging_setup.applicationbound():
         sys.exit(main())
