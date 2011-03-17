@@ -9,7 +9,6 @@ from logbook import Logger
 from .utils import escape
 
 base.DelayedCall.debug = True
-logger = Logger('paxos')
 
 class PaxosError(RuntimeError):
     pass
@@ -33,14 +32,23 @@ def _stop_waiting(timeout):
 
 
 class Paxos(object):
-    def __init__(self, transport, on_learn, on_prepare = None, quorum_timeout=2):
+    def __init__(self, transport, on_learn, on_prepare=None,
+            on_stale=None, quorum_timeout=2,
+            logger_group=None,
+        ):
+        self._logger = Logger('paxos')
+        if logger_group is not None:
+            logger_group.add_logger(self._logger)
+
         self.transport = transport
         self.on_learn = on_learn
         self.on_prepare = on_prepare
+        self.on_stale = on_stale
         self.quorum_timeout = quorum_timeout
 
         self.id = 0
         self.max_seen_id = 0
+        self.last_accepted_id = 0
 
         self.proposed_value = None
         self.deferred = None
@@ -50,6 +58,7 @@ class Paxos(object):
         self._accepted_timeout = None
         self._acks_timeout = None
         self._waiting_for_result = None
+        self._waiting_to_learn_id = deque()
 
     def recv(self, message, client):
         message = shlex.split(message)
@@ -62,7 +71,7 @@ class Paxos(object):
             self._start_paxos(value, deferred)
         else:
             self.queue.append((value, deferred))
-            logger.debug('Request for %s was queued, queue size is %s (because we are proposing %s now)' % (
+            self._logger.debug('Request for %s was queued, queue size is %s (because we are proposing %s now)' % (
                     value,
                     len(self.queue),
                     self.proposed_value,
@@ -79,23 +88,32 @@ class Paxos(object):
         self._num_acks_to_wait = self.transport.quorum_size
 
         def _timeout_callback():
-            logger.info('+++ prepare timeout')
+            self._logger.info('+++ prepare timeout')
             # TODO sometimes self.deferred is None when this callbach is called
             self.deferred.errback(PrepareTimeout())
             self.deferred = None
             self.proposed_value = None
 
         self._acks_timeout = reactor.callLater(self.quorum_timeout, _timeout_callback)
-        self.transport.broadcast('paxos_prepare %s' % self.id)
+        self.transport.broadcast('paxos_prepare %s %s' % (self.id, self.last_accepted_id))
 
-    def paxos_prepare(self, num, client):
+    def paxos_prepare(self, num, last_accepted_id, client):
         num = int(num)
-        if num > self.max_seen_id:
-            if self.on_prepare is not None:
-                self.on_prepare(num, client)
+        last_accepted_id = int(last_accepted_id)
 
-            self.max_seen_id = num
-            self._send_to(client, 'paxos_ack %s' % num)
+        if last_accepted_id > self.last_accepted_id:
+            # Move to the "stale" state
+            self._logger.debug('stale last_accepted_id(%s) < self.last_accepted_id(%s)' % (
+                last_accepted_id, self.last_accepted_id
+            ))
+            self.on_stale(last_accepted_id)
+        else:
+            if num > self.max_seen_id:
+                if self.on_prepare is not None:
+                    self.on_prepare(num, client)
+
+                self.max_seen_id = num
+                self._send_to(client, 'paxos_ack %s' % num)
 
     def paxos_ack(self, num, client):
         num = int(num)
@@ -107,7 +125,7 @@ class Paxos(object):
                 self._num_accepts_to_wait = self.transport.quorum_size
 
                 def _timeout_callback():
-                    logger.info('+++ accept timeout')
+                    self._logger.info('+++ accept timeout')
                     self.deferred.errback(AcceptTimeout())
                     self.deferred = None
                     self.proposed_value = None
@@ -121,6 +139,7 @@ class Paxos(object):
     def paxos_accept(self, num, value, client):
         num = int(num)
         if num == self.max_seen_id:
+            self._waiting_to_learn_id.append(num)
             self._send_to(client, 'paxos_accepted %s' % num)
 
     def paxos_accepted(self, num, client):
@@ -133,37 +152,45 @@ class Paxos(object):
                 self._waiting_for_result = num
 
     def paxos_learn(self, num, value, client):
-        logger.info('paxos.learn %s' % value)
+        self._logger.info('paxos.learn %s' % value)
 
         num = int(num)
-        if num == self.max_seen_id:
+        if self._waiting_to_learn_id and num == self._waiting_to_learn_id[0]:
+            self._waiting_to_learn_id.popleft()
+
             try:
                 result = self.on_learn(num, value)
             except Exception, e:
-                logger.exception('paxos.learn %s' % value)
+                self._logger.exception('paxos.learn %s' % value)
                 result = e
 
+            self.last_accepted_id = num
+
             if self._waiting_for_result == num:
+                # this works for current round coordinator only
+                # because it must return result to the client
+                # and to start a new round for next request
+
                 self._waiting_for_result = None
                 if isinstance(result, Exception):
-                    logger.warning('returning error from paxos.learn %s, %s' % (value, result))
+                    self._logger.warning('returning error from paxos.learn %s, %s' % (value, result))
                     self.deferred.errback(result)
                 else:
-                    logger.warning('returning success from paxos.learn %s' % value)
+                    self._logger.warning('returning success from paxos.learn %s' % value)
                     self.deferred.callback(result)
 
-                logger.debug('queue size: %s' % len(self.queue))
+                self._logger.debug('queue size: %s' % len(self.queue))
                 if self.queue:
                     # start new Paxos instance
                     # for next value from the queue
                     next_value, deferred = self.queue.pop()
-                    logger.debug('next value from the queue: %s' % value)
+                    self._logger.debug('next value from the queue: %s' % next_value)
                     self._start_paxos(next_value, deferred)
                 else:
                     self.proposed_value = None
                     self.deferred = None
         else:
-            logger.debug('learned value from old iteration')
+            self._logger.debug('learned value from another iteration (num=%s, waiting_to_learn=%s)' % (num, self._waiting_to_learn_id))
             if self.deferred is not None:
                 self.deferred.errback(LearnError())
 
@@ -171,7 +198,7 @@ class Paxos(object):
                 # start new Paxos instance
                 # for next value from the queue
                 next_value, deferred = self.queue.pop()
-                logger.debug('next value from the queue: %s' % value)
+                self._logger.debug('next value from the queue: %s' % next_value)
                 self._start_paxos(next_value, deferred)
             else:
                 self.proposed_value = None
@@ -183,12 +210,14 @@ class Paxos(object):
         return dict(
             id=self.id,
             max_seen_id=self.max_seen_id,
+            last_accepted_id=self.last_accepted_id,
         )
 
     def set_state(self, data):
         """Used to restore paxos state during node sync."""
         self.id = data['id']
         self.max_seen_id = data['max_seen_id']
+        self.last_accepted_id = data['last_accepted_id']
 
     def _send_to(self, client, message):
         client.send(message, self.transport)

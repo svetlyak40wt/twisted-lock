@@ -2,16 +2,15 @@
 from __future__ import absolute_import
 
 import random
-import time
 
 from twisted.internet.defer import inlineCallbacks
 from twisted.internet import reactor
 from itertools import chain
+from collections import deque
 
 from ..paxos import Paxos, PrepareTimeout, AcceptTimeout
 from ..utils import wait_calls
-from . import TestCase as BaseTestCase
-from . import seed
+from . import TestCase as BaseTestCase, seed
 
 
 class Network(object):
@@ -46,16 +45,16 @@ class Transport(object):
         self.network = network
         self.paxos = None
         self.log = []
+        self._queue = deque()
+        self._delayed_call = None
 
     def broadcast(self, message):
         print '%s broadcasting "%s"' % (self.id, message)
         return self.network.broadcast(message, self)
 
     def send(self, message, from_transport):
-        print '%s sending "%s" to %s' % (from_transport.id, message, self.id)
-        self.network._delayed_calls.append(
-            reactor.callLater(random.random(), self.paxos.recv, message, from_transport)
-        )
+        self._queue.append((message, from_transport))
+        self._reschedule()
 
     def learn(self, num, value):
         self.log.append((num, value))
@@ -65,13 +64,29 @@ class Transport(object):
     def quorum_size(self):
         return max(3, len(self.network.transports)/ 2 + 1)
 
+    def _send_next(self):
+        if self._queue:
+            message, from_transport = self._queue.popleft()
+
+            print '%s sending "%s" to %s' % (from_transport.id, message, self.id)
+            self.paxos.recv(message, from_transport)
+            self._reschedule()
+
+    def _reschedule(self):
+        if self._delayed_call is None or self._delayed_call.called:
+            delay = abs(random.normalvariate(0, 0.2))
+            self._delayed_call = reactor.callLater(delay, self._send_next)
+            self.network._delayed_calls.append(self._delayed_call)
+
 
 class PaxosTests(BaseTestCase):
     def setUp(self):
         self.net = Network()
         self.net.transports = [Transport(i, self.net) for i in xrange(5)]
         for tr in self.net.transports:
-            tr.paxos = Paxos(tr, on_learn=tr.learn)
+            def on_stale(last_accepted_id):
+                pass
+            tr.paxos = Paxos(tr, on_learn=tr.learn, on_stale=on_stale)
 
     def tearDown(self):
         for tr in self.net.transports:
@@ -145,15 +160,14 @@ class PaxosTests(BaseTestCase):
         # additional check if check_fail function
         # was really called
         if first_round_failed[0]:
-            self.assertEqual(
-                [(2, 'minor')] * 5,
-                self.net.log
-            )
+            for tr in self.net.transports:
+                self.assertEqual([(2, 'minor')], tr.log)
+
         elif second_round_failed[0]:
-            self.assertEqual(
-                [(1, 'blah')] * 5,
-                self.net.log
-            )
+            for tr in self.net.transports:
+                self.assertEqual([(1, 'blah')], tr.log)
+
         else:
-            raise RuntimeError('one round should be failed')
+            for tr in self.net.transports:
+                self.assertEqual([(1, 'blah'), (2, 'minor')], tr.log)
 

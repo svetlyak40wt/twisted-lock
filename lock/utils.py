@@ -69,7 +69,7 @@ def init_logging(config):
     if not _logging_initialized:
         handler = logbook.FileHandler(
             config.get('logging', 'filename') or 'twisted-lock.log',
-            format_string='[{record.time}] {record.level_name:>5} [%s] {record.module}:{record.lineno} {record.message}' % config.get('myself', 'listen')
+            format_string='[{record.time}] {record.level_name:>5} {record.extra[node]} {record.module}:{record.lineno} {record.message}',
         )
         handler.push_application()
 

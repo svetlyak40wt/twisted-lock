@@ -17,7 +17,7 @@ from ConfigParser import ConfigParser
 from .. lock import LockFactory, LockProtocol
 from .. config import Config
 from .. utils import init_logging
-from . import TestCase as BaseTestCase
+from . import TestCase as BaseTestCase, seed
 
 DelayedCall.debug = True
 logging_config = ConfigParser()
@@ -69,19 +69,6 @@ listen = %s
             setattr(self, 's%s' % (x+1), s)
             self.servers.append(s)
         self.addCleanup(self._close_servers)
-
-    def _run(self, method_name, result):
-        method = getattr(self, method_name)
-        seed = getattr(method, '_random_seed', int(time.time()))
-        random.seed(seed)
-
-        def seed_info_adder(failure):
-            failure.value.args = (failure.value.args[0] + ' (random seed: %s)' % seed,) + failure.value.args[1:]
-            return failure
-
-        d = super(TestCase, self)._run(method_name, result)
-        d.addErrback(seed_info_adder)
-        return d
 
     def _close_servers(self):
         for server in self.servers:
@@ -215,20 +202,27 @@ class Disconnections(TestCase):
     @inlineCallbacks
     def _run_disconnection_test(
         self,
-        expected_s2_log=[
-            'set-key blah ""',
-            'set-key minor ""',
-            'set-key again ""',
-        ],
-        expected_s3_log=[
-            'set-key again ""',
-        ],
+        s1_expected_log=None,
+        s2_expected_log=None,
+        s3_expected_log=None,
     ):
         """Adds three keys into the cluster:
             - blah
             - minor
             - again
         """
+        default_expected_log = [
+            'set-key blah ""',
+            'set-key minor ""',
+            'set-key again ""',
+        ]
+        if s1_expected_log is None:
+            s1_expected_log = default_expected_log
+        if s2_expected_log is None:
+            s2_expected_log = default_expected_log
+        if s3_expected_log is None:
+            s3_expected_log = default_expected_log
+
         yield self.wait_when_connection_establied()
 
         result = yield self.client.request(
@@ -256,19 +250,13 @@ class Disconnections(TestCase):
 
         self._assert_servers_consistency('blah', 'minor', 'again')
 
-        # full log here
-        self.assertEqual(expected_s2_log, self.s2._log)
-        # last command only, because this node received a snapshot
-        self.assertEqual(expected_s3_log, self.s3._log)
+        self.assertEqual(s1_expected_log, self.s1._log)
+        self.assertEqual(s2_expected_log, self.s2._log)
+        self.assertEqual(s3_expected_log, self.s3._log)
 
     @inlineCallbacks
     def test_no_connection_errors(self):
-        expected_log = [
-            'set-key blah ""',
-            'set-key minor ""',
-            'set-key again ""',
-        ]
-        yield self._run_disconnection_test(expected_log, expected_log)
+        yield self._run_disconnection_test()
 
     @inlineCallbacks
     def test_connection_lost_during_accept(self):
@@ -280,7 +268,12 @@ class Disconnections(TestCase):
 
         LockProtocol.send_line_hooks = [(
             re.compile(r'^paxos_accept 1 .*'), drop_connection)]
-        yield self._run_disconnection_test()
+        yield self._run_disconnection_test(
+            s3_expected_log=[
+                'set-key minor ""',
+                'set-key again ""',
+            ]
+        )
 
     @inlineCallbacks
     def test_connection_lost_during_prepare(self):
@@ -308,11 +301,14 @@ class Disconnections(TestCase):
 
         yield self.wait_when_connection_establied()
         yield self._add_key('and-again')
-        yield self._add_key('and-one-more')
 
-        self._assert_servers_consistency('blah', 'minor', 'again', 'and-again', 'and-one-more')
+        numerated = []
+        for i in xrange(10):
+            numerated.append('and-%s' % i)
+            yield self._add_key(numerated[-1])
+
+        self._assert_servers_consistency(*(['blah', 'minor', 'again', 'and-again'] + numerated))
         self.assertEqual(False, self.s3.get_stale())
-        self.assertEqual(['set-key and-one-more ""'], self.s3._log)
 
     @inlineCallbacks
     def _add_key(self, key):

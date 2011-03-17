@@ -14,7 +14,7 @@ from twisted.protocols.basic import LineReceiver
 from twisted.internet import reactor
 from twisted.internet.defer import Deferred
 from twisted.web import server
-from logbook import Logger
+from logbook import Logger, LoggerGroup
 
 from .utils import parse_ip, parse_ips, escape
 from .exceptions import KeyAlreadyExists, KeyNotFound
@@ -52,6 +52,7 @@ class Syncronizer(object):
                 self._factory._keys = data['keys']
                 self._factory._epoch = data['epoch']
                 self._factory.paxos.set_state(data['paxos'])
+                self._factory.set_stale(False)
 
     def on_sync_subscribe(self, line, client = None):
         self._subscribers.add(client)
@@ -105,6 +106,7 @@ class LockProtocol(LineReceiver):
     def log(self):
         if self._log is None:
             self._log = Logger('lockprotocol')
+            self.factory._logger_group.add_logger(self._log)
         return self._log
 
     def connectionMade(self):
@@ -159,7 +161,21 @@ class LockFactory(ClientFactory):
     protocol = LockProtocol
 
     def __init__(self, config):
-        self.paxos = Paxos(self, on_learn=self.on_learn, on_prepare=self.on_prepare)
+        self.log = Logger('lockfactory')
+
+        def inject_node(rec):
+            rec.extra['node'] = self.port
+
+        self._logger_group = LoggerGroup(processor=inject_node)
+        self._logger_group.add_logger(self.log)
+
+        self.paxos = Paxos(
+            self,
+            on_learn=self.on_learn,
+            on_prepare=self.on_prepare,
+            on_stale=lambda last_accepted_id: self.set_stale(True),
+            logger_group=self._logger_group,
+        )
 
         interface, port = parse_ip(config.get('myself', 'listen', '4001'))
         self.neighbours = parse_ips(config.get('cluster', 'nodes', '127.0.0.1:4001'))
@@ -175,8 +191,6 @@ class LockFactory(ClientFactory):
         self._closed = False
         # this flag is used to prevent recursion in _reconnect method
         self._reconnecting = False
-
-        self.log = Logger('lockfactory')
 
         self.connections = {}
         self._all_connections = []
@@ -247,6 +261,7 @@ class LockFactory(ClientFactory):
             ('stale', self._stale),
             ('current_id', self.paxos.id),
             ('max_seen_id', self.paxos.max_seen_id),
+            ('last_accepted_id', self.paxos.last_accepted_id),
             ('num_connections', len(self.connections)),
             ('quorum_size', self.quorum_size),
             ('log_size', len(self._log)),
