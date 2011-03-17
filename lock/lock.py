@@ -215,7 +215,6 @@ class LockFactory(ClientFactory):
         # map paxos-id -> proposer
         self._proposers = {}
 
-        self.add_callback('^paxos_learn.*$', self.check_is_this_node_is_stale)
         self.add_callback('^paxos_.*$', self.paxos.recv)
 
         self.replicator = Syncronizer(self)
@@ -388,10 +387,6 @@ class LockFactory(ClientFactory):
 
     # BEGIN Paxos Transport methods
     def broadcast(self, line):
-        if line.startswith('paxos_learn'):
-            # Add info about current epoch
-            line += ' %s' % self._epoch
-
         for connection in self.connections.values():
             connection.sendLine(line)
         return len(self.connections)
@@ -425,25 +420,6 @@ class LockFactory(ClientFactory):
     # END Paxos Transport methods
 
     # START Sync related stuff
-    def check_is_this_node_is_stale(self, line, client):
-        """This method process 'paxos_learn' command before the Paxos class.
-
-        It strips the Epoch number from it and checks if this replica is stale.
-        """
-        line, epoch = line.rsplit(' ', 1)
-        self.paxos.recv(line, client)
-
-        #epoch = int(epoch)
-        #insort(self._learn_queue, (epoch, line))
-
-        #while self._learn_queue and self._learn_queue[0][0] == self._epoch:
-        #    self.paxos.recv(self._learn_queue.pop(0)[1], client)
-
-        #if epoch - self._epoch > 5:
-        #    self.set_stale(True)
-        #else:
-        #    self.set_stale(False)
-        #    self.paxos.recv(line, client)
 
     def _log_cmd_set_key(self, key, value):
         if key in self._keys:
