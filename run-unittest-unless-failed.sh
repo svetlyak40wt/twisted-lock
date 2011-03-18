@@ -6,7 +6,7 @@ TEST_NAME=$1
 
 function growl()
 {
-    ssh -p 8888 localhost ~/usr/bin/growl "$1"
+    ssh -p 8888 localhost growlnotify  -t "Lock unittests" -m "'$1'"
 }
 
 for ITER in `seq $MAX_TRIES`
@@ -22,15 +22,12 @@ do
         MSG="Done with exit code=$CODE, iter=$ITER"
         echo $MSG
         growl "$MSG"
-        break
+        exit 1
     fi
 
     echo 'Retrying'
 done
 
-if [ $ITER == $MAX_TRIES ]; then
-    MSG="No more tries left."
-    echo $MSG
-    growl "$MSG"
-fi
-
+MSG="No more tries left."
+echo $MSG
+growl "$MSG"
