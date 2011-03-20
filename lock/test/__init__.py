@@ -1,8 +1,12 @@
 import random
 import time
 
+from ConfigParser import ConfigParser
+from twisted.internet.base import DelayedCall
 from twisted.trial import unittest
+from ..utils import init_logging
 
+DelayedCall.debug = True
 
 def seed(value):
     def decorator(func):
@@ -25,3 +29,11 @@ class TestCase(unittest.TestCase):
         d.addErrback(seed_info_adder)
         return d
 
+
+logging_config = ConfigParser()
+logging_config.add_section('logging')
+logging_config.set('logging', 'filename', 'unittest.log')
+logging_config.add_section('myself')
+logging_config.set('myself', 'listen', '0')
+
+init_logging(logging_config)

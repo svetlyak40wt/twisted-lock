@@ -7,6 +7,7 @@ from twisted.internet.defer import inlineCallbacks
 from twisted.internet import reactor
 from itertools import chain
 from collections import deque
+from logbook import LoggerGroup
 
 from ..paxos import Paxos, PrepareTimeout, AcceptTimeout
 from ..utils import wait_calls
@@ -49,10 +50,11 @@ class Transport(object):
         self._delayed_call = None
 
     def broadcast(self, message):
-        print '%s broadcasting "%s"' % (self.id, message)
+        self.paxos._logger.info('BROADCASTING "%s"' % message)
         return self.network.broadcast(message, self)
 
     def send(self, message, from_transport):
+        from_transport.paxos._logger.info('SEND "%s" to %s' % (message, self.id))
         self._queue.append((message, from_transport))
         self._reschedule()
 
@@ -68,7 +70,7 @@ class Transport(object):
         if self._queue:
             message, from_transport = self._queue.popleft()
 
-            print '%s sending "%s" to %s' % (from_transport.id, message, self.id)
+            self.paxos._logger.info('RECV "%s"' % message)
             self.paxos.recv(message, from_transport)
             self._reschedule()
 
@@ -83,10 +85,24 @@ class PaxosTests(BaseTestCase):
     def setUp(self):
         self.net = Network()
         self.net.transports = [Transport(i, self.net) for i in xrange(5)]
-        for tr in self.net.transports:
+
+        def create_paxos(tr, node_id):
             def on_stale(last_accepted_id):
                 pass
-            tr.paxos = Paxos(tr, on_learn=tr.learn, on_stale=on_stale)
+
+            def inject_node(rec):
+                rec.extra['node'] = node_id
+
+            _logger_group = LoggerGroup(processor=inject_node)
+            tr.paxos = Paxos(
+                tr,
+                on_learn=tr.learn,
+                on_stale=on_stale,
+                logger_group=_logger_group,
+            )
+
+        for tr in self.net.transports:
+            create_paxos(tr, tr.id)
 
     def tearDown(self):
         for tr in self.net.transports:
@@ -124,7 +140,6 @@ class PaxosTests(BaseTestCase):
         b = yield self.net.transports[1].paxos.propose('minor')
 
         yield self.net.wait_delayed_calls()
-        print 'RESULT:', a, b
         self.assertEqual(
             [(1, 'blah')] * 5 + [(2, 'minor')] * 5,
             self.net.log
@@ -161,13 +176,13 @@ class PaxosTests(BaseTestCase):
         # was really called
         if first_round_failed[0]:
             for tr in self.net.transports:
-                self.assertEqual([(2, 'minor')], tr.log)
+                self.assertEqual([(2, 'minor')], tr.log, 'Transport id=%s' % tr.id)
 
         elif second_round_failed[0]:
             for tr in self.net.transports:
-                self.assertEqual([(1, 'blah')], tr.log)
+                self.assertEqual([(1, 'blah')], tr.log, 'Transport id=%s' % tr.id)
 
         else:
             for tr in self.net.transports:
-                self.assertEqual([(1, 'blah'), (2, 'minor')], tr.log)
+                self.assertEqual([(1, 'blah'), (2, 'minor')], tr.log, 'Transport id=%s' % tr.id)
 

@@ -8,6 +8,7 @@ import pickle
 import base64
 
 from bisect import insort
+from collections import deque
 from operator import itemgetter
 from twisted.internet.protocol import ClientFactory
 from twisted.protocols.basic import LineReceiver
@@ -215,7 +216,10 @@ class LockFactory(ClientFactory):
         # map paxos-id -> proposer
         self._proposers = {}
 
-        self.add_callback('^paxos_.*$', self.paxos.recv)
+        # this buffer is used to keep messages
+        # when node is stale
+        self._paxos_messages_buffer = deque()
+        self.add_callback('^paxos_.*$', self._process_paxos_messages)
 
         self.replicator = Syncronizer(self)
 
@@ -254,9 +258,14 @@ class LockFactory(ClientFactory):
 
     def get_status(self):
         """Returns a list of tuples (param_name, value)."""
+        if self.master is not None:
+            master = ':'.join(self.master.http)
+        else:
+            master = 'None'
+
         return [
             ('bind', '%s:%s' % (self.interface, self.port)),
-            ('master', self.master),
+            ('master', master),
             ('stale', self._stale),
             ('current_id', self.paxos.id),
             ('max_seen_id', self.paxos.max_seen_id),
@@ -444,6 +453,10 @@ class LockFactory(ClientFactory):
                 self.log.error('Synced, switched to the "normal" mode.')
                 self.replicator.unsubscribe()
 
+                # Apply all commands, received while we were stale
+                while self._paxos_messages_buffer:
+                    self.paxos.recv(*self._paxos_messages_buffer.popleft())
+
                 # Notify all waiters that node's state was synced.
                 for waiter in self._sync_completion_waiters:
                     waiter.callback(True)
@@ -453,6 +466,12 @@ class LockFactory(ClientFactory):
             self.replicator.subscribe()
 
         self._stale = value
+
+    def _process_paxos_messages(self, line, client):
+        if self.get_stale():
+            self._paxos_messages_buffer.append((line, client))
+        else:
+            self.paxos.recv(line, client)
 
 
 def stop_waiting(timeout):

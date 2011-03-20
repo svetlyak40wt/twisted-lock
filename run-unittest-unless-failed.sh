@@ -1,12 +1,12 @@
 #!/bin/bash
 
-MAX_TRIES=100
+MAX_TRIES=${2:-100}
 LOG_FILENAME=unittest.log
 TEST_NAME=$1
 
 function growl()
 {
-    ssh -p 8888 localhost growlnotify  -t "Lock unittests" -m "'$1'"
+    ssh -p 8888 localhost growlnotify --sticky -t "Lock unittests" -m "'$1'" 2> /dev/null
 }
 
 for ITER in `seq $MAX_TRIES`

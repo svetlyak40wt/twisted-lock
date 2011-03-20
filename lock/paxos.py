@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 import shlex
 
 from twisted.internet.defer import Deferred
@@ -5,6 +6,7 @@ from twisted.internet import base
 from twisted.internet import reactor
 from collections import deque
 from logbook import Logger
+from bisect import insort
 
 from .utils import escape
 
@@ -33,7 +35,7 @@ def _stop_waiting(timeout):
 
 class Paxos(object):
     def __init__(self, transport, on_learn, on_prepare=None,
-            on_stale=None, quorum_timeout=2,
+            on_stale=None, quorum_timeout=3,
             logger_group=None,
         ):
         self._logger = Logger('paxos')
@@ -53,11 +55,11 @@ class Paxos(object):
         self.proposed_value = None
         self.deferred = None
         self.queue = deque() # queue of (value, deferred) to propose
+        self._learn_queue = [] # sorted list with learn requests which come out of order
 
         # delayed calls for timeouts
         self._accepted_timeout = None
         self._acks_timeout = None
-        self._waiting_for_result = None
         self._waiting_to_learn_id = deque()
 
     def recv(self, message, client):
@@ -139,7 +141,12 @@ class Paxos(object):
     def paxos_accept(self, num, value, client):
         num = int(num)
         if num == self.max_seen_id:
-            self._waiting_to_learn_id.append(num)
+            if self.id == num:
+                # we have a deferred to return result in this round
+                self._waiting_to_learn_id.append((num, self.deferred))
+            else:
+                # may be we have deferred but it is for another Paxos round
+                self._waiting_to_learn_id.append((num, None))
             self._send_to(client, 'paxos_accepted %s' % num)
 
     def paxos_accepted(self, num, client):
@@ -149,14 +156,13 @@ class Paxos(object):
             if self._num_accepts_to_wait == 0:
                 _stop_waiting(self._accepted_timeout)
                 self.transport.broadcast('paxos_learn %s "%s"' % (self.id, escape(self.proposed_value)))
-                self._waiting_for_result = num
 
     def paxos_learn(self, num, value, client):
         self._logger.info('paxos.learn %s' % value)
 
         num = int(num)
-        if self._waiting_to_learn_id and num == self._waiting_to_learn_id[0]:
-            self._waiting_to_learn_id.popleft()
+        if self._waiting_to_learn_id and num == self._waiting_to_learn_id[0][0]:
+            num, deferred = self._waiting_to_learn_id.popleft()
 
             try:
                 result = self.on_learn(num, value)
@@ -166,18 +172,17 @@ class Paxos(object):
 
             self.last_accepted_id = num
 
-            if self._waiting_for_result == num:
+            if deferred is not None and value == self.proposed_value:
                 # this works for current round coordinator only
                 # because it must return result to the client
                 # and to start a new round for next request
 
-                self._waiting_for_result = None
                 if isinstance(result, Exception):
                     self._logger.warning('returning error from paxos.learn %s, %s' % (value, result))
-                    self.deferred.errback(result)
+                    deferred.errback(result)
                 else:
                     self._logger.warning('returning success from paxos.learn %s' % value)
-                    self.deferred.callback(result)
+                    deferred.callback(result)
 
                 self._logger.debug('queue size: %s' % len(self.queue))
                 if self.queue:
@@ -189,20 +194,18 @@ class Paxos(object):
                 else:
                     self.proposed_value = None
                     self.deferred = None
+
+            if self._learn_queue:
+                self._logger.debug('relearning remembered values')
+                # clear queue because it will be filled again if needed
+                queue, self._learn_queue = self._learn_queue, []
+                for args in queue:
+                    self.paxos_learn(*args)
+
         else:
             self._logger.debug('learned value from another iteration (num=%s, waiting_to_learn=%s)' % (num, self._waiting_to_learn_id))
-            if self.deferred is not None:
-                self.deferred.errback(LearnError())
-
-            if self.queue:
-                # start new Paxos instance
-                # for next value from the queue
-                next_value, deferred = self.queue.pop()
-                self._logger.debug('next value from the queue: %s' % next_value)
-                self._start_paxos(next_value, deferred)
-            else:
-                self.proposed_value = None
-                self.deferred = None
+            insort(self._learn_queue, (num, value, client))
+            # TODO add timeout for learn_queue emptiness
 
 
     def get_state(self):
