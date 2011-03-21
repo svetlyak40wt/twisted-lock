@@ -10,9 +10,9 @@ from twisted.internet.defer import inlineCallbacks, gatherResults
 from twisted.web.http import EXPECTATION_FAILED, OK
 from StringIO import StringIO
 
-from .. lock import LockFactory, LockProtocol
-from .. config import Config
-from . import TestCase as BaseTestCase, seed
+from ..lock import LockFactory, LockProtocol, Syncronizer
+from ..config import Config
+from .import TestCase as BaseTestCase, seed
 
 def cfg(text):
     config = Config()
@@ -317,10 +317,44 @@ class Disconnections(TestCase):
                     e.args = ('In %s server: ' % (x + 1) + e.args[0],)
                     raise
 
+from mock import patch, Mock
+class Sync(TestCase):
+    def setUp(self):
+        self.patch = patch('lock.lock.Syncronizer')
+        self.Syncronizer = self.patch.start()
+        self.Syncronizer.side_effect = lambda *args, **kwargs: Mock(wraps=Syncronizer(*args, **kwargs))
+        super(Sync, self).setUp()
+
+    def tearDown(self):
+        self.patch.stop()
+        super(Sync, self).tearDown()
+
+    @inlineCallbacks
+    def test_stale_not_does_not_reply_on_sync_requests(self):
+        result = yield self.wait_when_connection_establied()
+        self.s1._stale = True
+        self.s2._stale = True
+
+        trs = [item.transport for item in self.s3.connections.values()]
+        if None in trs:
+            import pdb;pdb.set_trace()
+        self.s3.set_stale(True)
+
+        result = yield self.client.request(
+            'GET',
+            'http://%s:%s/info/status' % (self.s3.http_interface, self.s3.http_port)
+        )
+        calls = lambda s: [item[0] for item in s.syncronizer.method_calls]
+
+        self.assert_(calls(self.s1) == [] or calls(self.s2) == [])
+        other_calls = calls(self.s1) + calls(self.s2)
+        self.assertEqual(['on_sync_subscribe'], other_calls)
+        # No on_sync_snapshot', 'unsubscribe' should be called because two
+        # other nodes are stale
+        self.assertEqual(['subscribe'], calls(self.s3))
 
 # какие могут быть тесты
-# 4. Одновременное добавление лока через разные ноды должно приводить только к одной успешной операции.
-# 5. Одновременное добавление разных локов через разные ноды должно приводить только к одинаковым логам на каждом узле.
-# 6. После временного отключения и последующего подключения узла, он должен узнавать о состоянии системы
-#    и пока не узнает, не должен принимать запросов и участия в процессе выбора.
 # 7. Если большой кластер развалился на два, меньший, должен отдавать какой-нибудь подходящий HTTP код ошибки.
+
+# Если запрос на синхронизацию приходит к отставшей ноде она не должна отвечать.
+# Потеря мастера приводит к выбору нового, а старый мастер после переподключения, понмает, что стал slave.

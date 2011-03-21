@@ -40,10 +40,6 @@ class Syncronizer(object):
         self._subscribers = set()
         self._syncing_with_node = None
 
-        factory.add_callback('^sync_subscribe$', self.on_sync_subscribe)
-        factory.add_callback('^sync_unsubscribe$', self.on_sync_subscribe)
-        factory.add_callback('^sync_snapshot .*$', self.on_sync_snapshot)
-
     def on_sync_snapshot(self, line, client = None):
         if self._syncing_with_node is not None:
             cmd_name, data = line.split(' ', 1)
@@ -56,15 +52,16 @@ class Syncronizer(object):
                 self._factory.set_stale(False)
 
     def on_sync_subscribe(self, line, client = None):
-        self._subscribers.add(client)
-        data = dict(
-            keys=self._factory._keys,
-            epoch=self._factory._epoch,
-            paxos=self._factory.paxos.get_state(),
-        )
-        client.sendLine(
-            'sync_snapshot ' + base64.b64encode(pickle.dumps(data))
-        )
+        if not self._factory.get_stale():
+            self._subscribers.add(client)
+            data = dict(
+                keys=self._factory._keys,
+                epoch=self._factory._epoch,
+                paxos=self._factory.paxos.get_state(),
+            )
+            client.sendLine(
+                'sync_snapshot ' + base64.b64encode(pickle.dumps(data))
+            )
 
     def on_sync_unsubscribe(self, line, client = None):
         if client in self._subscribers:
@@ -102,6 +99,8 @@ class LockProtocol(LineReceiver):
         self.other_side = (None, None)
         self.http = (None, None)
         self._log = None
+        self.on_connect = lambda x: None # callback to call in connectionMade
+        self.on_disconnect = lambda x: None # callback to call in connectionLost
 
     @property
     def log(self):
@@ -111,13 +110,14 @@ class LockProtocol(LineReceiver):
         return self._log
 
     def connectionMade(self):
+        self.on_connect()
         self.sendLine('params %s %s' % (
             self.factory.http_interface,
             self.factory.http_port,
         ))
 
     def connectionLost(self, reason):
-        self.factory.remove_connection(self)
+        self.on_disconnect()
 
     def lineReceived(self, line):
         self.log.info('RECV: ' + line)
@@ -221,7 +221,10 @@ class LockFactory(ClientFactory):
         self._paxos_messages_buffer = deque()
         self.add_callback('^paxos_.*$', self._process_paxos_messages)
 
-        self.replicator = Syncronizer(self)
+        self.syncronizer = Syncronizer(self)
+        self.add_callback('^sync_subscribe$', self.syncronizer.on_sync_subscribe)
+        self.add_callback('^sync_unsubscribe$', self.syncronizer.on_sync_subscribe)
+        self.add_callback('^sync_snapshot .*$', self.syncronizer.on_sync_snapshot)
 
         self.log.debug('Opening the port %s:%s' % (self.interface, self.port))
         self._port_listener = reactor.listenTCP(self.port, self, interface = self.interface)
@@ -378,13 +381,21 @@ class LockFactory(ClientFactory):
         result = ClientFactory.buildProtocol(self, addr)
         result.other_side = conn
 
-        self._all_connections.append(result)
+        def on_connect():
+            """This callback will be called when actual connection happened."""
+            self._all_connections.append(result)
 
-        if addr.port in map(itemgetter(1), self.neighbours):
-            self.log.info('Connected to another server: %s:%s' % conn)
-            self.add_connection(result)
-        else:
-            self.log.info('Connection from another server accepted: %s:%s' % conn)
+            if addr.port in map(itemgetter(1), self.neighbours):
+                self.log.info('Connected to another server: %s:%s' % conn)
+                self.add_connection(result)
+            else:
+                self.log.info('Connection from another server accepted: %s:%s' % conn)
+
+        def on_disconnect():
+            self.remove_connection(result)
+
+        result.on_connect = on_connect
+        result.on_disconnect = on_disconnect
         return result
 
     def clientConnectionFailed(self, connector, reason):
@@ -451,7 +462,7 @@ class LockFactory(ClientFactory):
         if self._stale is True:
             if value is False:
                 self.log.error('Synced, switched to the "normal" mode.')
-                self.replicator.unsubscribe()
+                self.syncronizer.unsubscribe()
 
                 # Apply all commands, received while we were stale
                 while self._paxos_messages_buffer:
@@ -463,7 +474,7 @@ class LockFactory(ClientFactory):
                 self._sync_completion_waiters = []
         elif value is True:
             self.log.error('Node is out of sync, switched to "sync" mode.')
-            self.replicator.subscribe()
+            self.syncronizer.subscribe()
 
         self._stale = value
 
