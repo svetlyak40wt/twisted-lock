@@ -355,8 +355,51 @@ class Sync(TestCase):
         # other nodes are stale
         self.assertEqual(['subscribe'], calls(ns))
 
+    @inlineCallbacks
+    def test_choose_another_master(self):
+        """Выбор другого мастера"""
+        result = yield self.client.request(
+            'POST',
+            'http://%s:%s/blah' % (self.s1.http_interface, self.s1.http_port)
+        )
+        self.assertEqual(200, result.code)
+
+        result = yield self.client.request(
+            'POST',
+            'http://%s:%s/minor' % (self.s5.http_interface, self.s5.http_port)
+        )
+        self.assertEqual(200, result.code)
+
+        self.assertEqual(9001, self.s2.master.http[1])
+
+        result = yield self.stop_server(1)
+
+        result = yield self.client.request(
+            'POST',
+            'http://%s:%s/again' % (self.s5.http_interface, self.s5.http_port)
+        )
+        self.assertEqual(200, result.code)
+
+        # another node was choosen
+        self.assertEqual(9005, self.s2.master.http[1])
+
+        self.start_server(1)
+        yield self.wait_when_connection_establied()
+
+        # first node still thinks, it is master
+        self.assertEqual(9001, self.s1.master.http[1])
+
+        result = yield self.client.request(
+            'POST',
+            'http://%s:%s/and-again' % (self.s5.http_interface, self.s5.http_port)
+        )
+
+        # now first node discover another master
+        self.assertEqual(9001, self.s1.master.http[1])
+
+        self._assert_servers_consistency(*['blah', 'minor', 'again', 'and-again'])
+
 # какие могут быть тесты
 # 7. Если большой кластер развалился на два, меньший, должен отдавать какой-нибудь подходящий HTTP код ошибки.
 
-# Если запрос на синхронизацию приходит к отставшей ноде она не должна отвечать.
 # Потеря мастера приводит к выбору нового, а старый мастер после переподключения, понмает, что стал slave.
