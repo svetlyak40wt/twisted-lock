@@ -2,6 +2,7 @@
 from __future__ import absolute_import
 
 import re
+import operator
 
 from twisted.web.client import Agent, getPage
 from twisted.internet import reactor
@@ -319,6 +320,8 @@ class Disconnections(TestCase):
 
 from mock import patch, Mock
 class Sync(TestCase):
+    num_nodes = 5
+
     def setUp(self):
         self.patch = patch('lock.lock.Syncronizer')
         self.Syncronizer = self.patch.start()
@@ -332,26 +335,25 @@ class Sync(TestCase):
     @inlineCallbacks
     def test_stale_not_does_not_reply_on_sync_requests(self):
         result = yield self.wait_when_connection_establied()
-        self.s1._stale = True
-        self.s2._stale = True
 
-        trs = [item.transport for item in self.s3.connections.values()]
-        if None in trs:
-            import pdb;pdb.set_trace()
-        self.s3.set_stale(True)
+        ns = self.servers[0] # not stale server
+
+        for s in self.servers[1:]:
+            s._stale = True
+
+        ns.set_stale(True) # now change state to stale
 
         result = yield self.client.request(
             'GET',
-            'http://%s:%s/info/status' % (self.s3.http_interface, self.s3.http_port)
+            'http://%s:%s/info/status' % (ns.http_interface, ns.http_port)
         )
         calls = lambda s: [item[0] for item in s.syncronizer.method_calls]
 
-        self.assert_(calls(self.s1) == [] or calls(self.s2) == [])
-        other_calls = calls(self.s1) + calls(self.s2)
+        other_calls = reduce(operator.add, (calls(s) for s in self.servers[1:]))
         self.assertEqual(['on_sync_subscribe'], other_calls)
         # No on_sync_snapshot', 'unsubscribe' should be called because two
         # other nodes are stale
-        self.assertEqual(['subscribe'], calls(self.s3))
+        self.assertEqual(['subscribe'], calls(ns))
 
 # какие могут быть тесты
 # 7. Если большой кластер развалился на два, меньший, должен отдавать какой-нибудь подходящий HTTP код ошибки.
