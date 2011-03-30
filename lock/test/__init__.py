@@ -3,6 +3,8 @@ import time
 
 from ConfigParser import ConfigParser
 from twisted.internet.base import DelayedCall
+from twisted.internet.defer import Deferred
+from twisted.internet.protocol import Protocol
 from twisted.trial import unittest
 from ..utils import init_logging
 
@@ -28,6 +30,24 @@ class TestCase(unittest.TestCase):
         d = super(TestCase, self)._run(method_name, result)
         d.addErrback(seed_info_adder)
         return d
+
+class BodyReceiver(Protocol):
+    def __init__(self):
+        self.done = Deferred()
+        self._data = []
+
+    def dataReceived(self, data):
+        self._data.append(data)
+
+    def connectionLost(self, reason):
+        self.done.callback(''.join(self._data))
+
+
+def get_body(response):
+    """A helper to retrive body of HTTP response."""
+    protocol = BodyReceiver()
+    response.deliverBody(protocol)
+    return protocol.done
 
 
 logging_config = ConfigParser()

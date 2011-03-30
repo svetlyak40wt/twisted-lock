@@ -24,7 +24,7 @@ class Network(object):
         for tr in self.transports:
             tr.send(message, from_transport)
 
-    def learn(self, num, value):
+    def learn(self, num, value, client):
         self.log.append((num, value))
         return (num, value)
 
@@ -58,9 +58,9 @@ class Transport(object):
         self._queue.append((message, from_transport))
         self._reschedule()
 
-    def learn(self, num, value):
+    def learn(self, num, value, client):
         self.log.append((num, value))
-        return self.network.learn(num, value)
+        return self.network.learn(num, value, client)
 
     @property
     def quorum_size(self):

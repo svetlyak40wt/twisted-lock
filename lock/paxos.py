@@ -51,6 +51,7 @@ class Paxos(object):
         self.id = 0
         self.max_seen_id = 0
         self.last_accepted_id = 0
+        self._logger.debug('2 last_accepted_id=%(last_accepted_id)s' % self.__dict__)
 
         self.proposed_value = None
         self.deferred = None
@@ -165,12 +166,13 @@ class Paxos(object):
             num, deferred = self._waiting_to_learn_id.popleft()
 
             try:
-                result = self.on_learn(num, value)
+                result = self.on_learn(num, value, client)
             except Exception, e:
                 self._logger.exception('paxos.learn %s' % value)
                 result = e
 
             self.last_accepted_id = num
+            self._logger.debug('1 last_accepted_id=%(last_accepted_id)s' % self.__dict__)
 
             if deferred is not None and value == self.proposed_value:
                 # this works for current round coordinator only
@@ -221,6 +223,7 @@ class Paxos(object):
         self.id = data['id']
         self.max_seen_id = data['max_seen_id']
         self.last_accepted_id = data['last_accepted_id']
+        self._logger.debug('3 last_accepted_id=%(last_accepted_id)s' % self.__dict__)
 
     def _send_to(self, client, message):
         client.send(message, self.transport)

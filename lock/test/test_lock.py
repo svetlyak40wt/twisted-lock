@@ -11,9 +11,10 @@ from twisted.internet.defer import inlineCallbacks, gatherResults
 from twisted.web.http import EXPECTATION_FAILED, OK
 from StringIO import StringIO
 
-from ..lock import LockFactory, LockProtocol, Syncronizer
+from ..lock import LockFactory, LockProtocol, Syncronizer, Logger
 from ..config import Config
-from .import TestCase as BaseTestCase, seed
+from ..utils import wait_calls
+from .import TestCase as BaseTestCase, seed, get_body
 
 def cfg(text):
     config = Config()
@@ -77,6 +78,26 @@ listen = %s
     @inlineCallbacks
     def wait_when_connection_establied(self):
         yield gatherResults([s.when_connected() for s in self.servers])
+
+    @inlineCallbacks
+    def _add_key(self, key):
+        result = yield self.client.request(
+            'POST',
+            'http://%s:%s/%s' % (self.s1.http_interface, self.s1.http_port, key)
+        )
+        self.assertEqual(OK, result.code)
+
+    def _assert_servers_consistency(self, *args):
+        for x, s in enumerate(self.servers):
+            if s is not None:
+                try:
+                    self.assertEqual(
+                        dict((item, '') for item in args),
+                        s._keys
+                    )
+                except Exception, e:
+                    e.args = ('In %s server: ' % (x + 1) + e.args[0],)
+                    raise
 
 
 class Simple(TestCase):
@@ -298,25 +319,6 @@ class Disconnections(TestCase):
         self._assert_servers_consistency(*(['blah', 'minor', 'again', 'and-again'] + numerated))
         self.assertEqual(False, self.s3.get_stale())
 
-    @inlineCallbacks
-    def _add_key(self, key):
-        result = yield self.client.request(
-            'POST',
-            'http://%s:%s/%s' % (self.s1.http_interface, self.s1.http_port, key)
-        )
-        self.assertEqual(OK, result.code)
-
-    def _assert_servers_consistency(self, *args):
-        for x, s in enumerate(self.servers):
-            if s is not None:
-                try:
-                    self.assertEqual(
-                        dict((item, '') for item in args),
-                        s._keys
-                    )
-                except Exception, e:
-                    e.args = ('In %s server: ' % (x + 1) + e.args[0],)
-                    raise
 
 from mock import patch, Mock
 class Sync(TestCase):
@@ -363,13 +365,13 @@ class Sync(TestCase):
             'http://%s:%s/blah' % (self.s1.http_interface, self.s1.http_port)
         )
         self.assertEqual(200, result.code)
+        self.assertEqual(9001, self.s2.master.http[1])
 
         result = yield self.client.request(
             'POST',
             'http://%s:%s/minor' % (self.s5.http_interface, self.s5.http_port)
         )
         self.assertEqual(200, result.code)
-
         self.assertEqual(9001, self.s2.master.http[1])
 
         result = yield self.stop_server(1)
@@ -378,6 +380,7 @@ class Sync(TestCase):
             'POST',
             'http://%s:%s/again' % (self.s5.http_interface, self.s5.http_port)
         )
+        body = yield get_body(result)
         self.assertEqual(200, result.code)
 
         # another node was choosen
@@ -386,18 +389,30 @@ class Sync(TestCase):
         self.start_server(1)
         yield self.wait_when_connection_establied()
 
-        # first node still thinks, it is master
-        self.assertEqual(9001, self.s1.master.http[1])
+        # first node does not knows any master after connection was established
+        self.assertEqual(None, self.s1.master)
 
         result = yield self.client.request(
             'POST',
             'http://%s:%s/and-again' % (self.s5.http_interface, self.s5.http_port)
         )
 
-        # now first node discover another master
-        self.assertEqual(9001, self.s1.master.http[1])
+        # old master still does not know about the new master
+        # because it received it's state as a snapshot
+        yield wait_calls(lambda: self.s1.master is not None)
+        self.assertEqual(9005, self.s1.master.http[1])
 
-        self._assert_servers_consistency(*['blah', 'minor', 'again', 'and-again'])
+        result = yield self.client.request(
+            'POST',
+            'http://%s:%s/and-one-more' % (self.s5.http_interface, self.s5.http_port)
+        )
+
+        # now first node discovered another master
+        self.assertEqual(9005, self.s1.master.http[1])
+        # and it is not stale
+        self.assertEqual(False, self.s1.get_stale())
+
+        self._assert_servers_consistency(*['blah', 'minor', 'again', 'and-again', 'and-one-more'])
 
 # какие могут быть тесты
 # 7. Если большой кластер развалился на два, меньший, должен отдавать какой-нибудь подходящий HTTP код ошибки.

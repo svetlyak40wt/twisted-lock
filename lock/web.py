@@ -9,9 +9,10 @@ from twisted.web import resource
 from twisted.web.http import CONFLICT, NOT_FOUND, INTERNAL_SERVER_ERROR, EXPECTATION_FAILED
 from twisted.web.server import NOT_DONE_YET
 from twisted.web.proxy import ProxyClientFactory
+from twisted.internet.defer import Deferred, inlineCallbacks, returnValue
+from twisted.internet.error import ConnectionDone
 from twisted.internet.task import deferLater
 from twisted.internet import reactor
-from twisted.internet.defer import inlineCallbacks, returnValue
 from twisted.python.log import err
 from twisted.python.failure import Failure
 
@@ -67,10 +68,32 @@ def proxy_to_master(func):
     def wrapper(self, request, *args, **kwargs):
         if self._lock.master is not None and \
            self._lock.master.http != (self._lock.http_interface, self._lock.http_port):
-            return self._proxy(request)
+
+            def try_to_do_this_myself(reason):
+                self.log.error('Proxy request failed with message: "%s", trying to run request locally.' % (reason,))
+                self._lock.master = None
+                return func(self, request, *args, **kwargs)
+
+            proxy_factory = self._proxy(request)
+            proxy_factory.done.addErrback(try_to_do_this_myself)
+            return NOT_DONE_YET
         else:
             return func(self, request, *args, **kwargs)
     return wrapper
+
+
+class LockProxyClientFactory(ProxyClientFactory):
+    def __init__(self, *args, **kwargs):
+        ProxyClientFactory.__init__(self, *args, **kwargs)
+        self.done = Deferred()
+
+    def clientConnectionLost(self, connector, reason):
+        if reason.type != ConnectionDone:
+            self.done.errback(reason)
+        self.done.callback(True)
+
+    def clientConnectionFailed(self, connector, reason):
+        self.done.errback(reason)
 
 
 class Root(resource.Resource):
@@ -106,10 +129,6 @@ class Root(resource.Resource):
     @delayed
     def render_POST(self, request):
         try:
-            #if self._lock.master is not None and \
-            #   self._lock.master.http != (self._lock.http_interface, self._lock.http_port):
-            #    returnValue(self._proxy(request))
-            #else:
             key = _get_key_from_path(request.path)
             data = request.args.get('data', [''])[0]
 
@@ -160,9 +179,9 @@ class Root(resource.Resource):
         self.log.debug('Proxing %s %s to the master at %s:%s' %
             (request.method, rest, host, port)
         )
-        clientFactory = ProxyClientFactory(
+        client_factory = LockProxyClientFactory(
             request.method, rest, request.clientproto,
             request.getAllHeaders(), request.content.read(), request)
-        reactor.connectTCP(host, port, clientFactory)
-        return NOT_DONE_YET
+        reactor.connectTCP(host, port, client_factory)
+        return client_factory
 

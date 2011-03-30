@@ -163,6 +163,9 @@ class LockFactory(ClientFactory):
 
     def __init__(self, config):
         self.log = Logger('lockfactory')
+        interface, port = parse_ip(config.get('myself', 'listen', '4001'))
+        self.port = port
+        self.interface = interface
 
         def inject_node(rec):
             rec.extra['node'] = self.port
@@ -170,6 +173,7 @@ class LockFactory(ClientFactory):
         self._logger_group = LoggerGroup(processor=inject_node)
         self._logger_group.add_logger(self.log)
 
+        self.log.debug('creating lock factory')
         self.paxos = Paxos(
             self,
             on_learn=self.on_learn,
@@ -178,12 +182,9 @@ class LockFactory(ClientFactory):
             logger_group=self._logger_group,
         )
 
-        interface, port = parse_ip(config.get('myself', 'listen', '4001'))
         self.neighbours = parse_ips(config.get('cluster', 'nodes', '127.0.0.1:4001'))
         self._first_connect_delay = float(config.get('cluster', 'first_connect_delay', 0))
 
-        self.port = port
-        self.interface = interface
         self.master = None
         self._stale = False
         self._delayed_reconnect = None
@@ -415,7 +416,7 @@ class LockFactory(ClientFactory):
     def quorum_size(self):
         return max(2, len(self.connections)/ 2 + 1)
 
-    def on_learn(self, num, value):
+    def on_learn(self, num, value, client):
         """First callback in the paxos result accepting chain."""
         self.log.info('factory.on_learn %s %s' % (len(self._log) + 1, value))
 
@@ -435,7 +436,7 @@ class LockFactory(ClientFactory):
             raise
 
     def on_prepare(self, num, client):
-        self.master = client
+        pass
 
     # END Paxos Transport methods
 
@@ -479,6 +480,10 @@ class LockFactory(ClientFactory):
         self._stale = value
 
     def _process_paxos_messages(self, line, client):
+        if line.startswith('paxos_accept '):
+            self.log.info('SET MASTER=%s' % (client.http,))
+            self.master = client
+
         if self.get_stale():
             self._paxos_messages_buffer.append((line, client))
         else:
