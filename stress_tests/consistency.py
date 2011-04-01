@@ -51,16 +51,13 @@ def choose_server(worker_id):
 class Server(object):
     def __init__(self, id_):
         self.id = id_
-        self.config = 'configs.server%d' % id_
+        self.config = 'stress_tests.configs.server%d' % id_
         self.pid = None
 
     def start(self):
         if self.pid is None:
             logger.info('Starting server %s' % self.id)
-            self.pid = subprocess.Popen(
-                ['./server.py', self.config],
-                env=dict(PYTHONPATH=os.path.dirname(__file__))
-            )
+            self.pid = subprocess.Popen(['./server.py', self.config])
 
     def stop(self):
         if self.pid is not None:

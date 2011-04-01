@@ -2,6 +2,7 @@
 
 MAX_TRIES=${1:-20}
 LOG_FILENAME=stress_tests/log/client.log
+#export PYTHONPATH=`pwd`/stress_tests:$PYTHONPATH
 
 function notify()
 {
