@@ -7,7 +7,6 @@ import random
 import pickle
 import base64
 
-from bisect import insort
 from collections import deque
 from operator import itemgetter
 from twisted.internet.protocol import ClientFactory
@@ -264,7 +263,7 @@ class LockFactory(ClientFactory):
     def get_status(self):
         """Returns a list of tuples (param_name, value)."""
         if self.master is not None:
-            master = ':'.join(self.master.http)
+            master = ':'.join(map(str, self.master.http))
         else:
             master = 'None'
 
