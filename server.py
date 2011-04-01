@@ -9,8 +9,7 @@ from lock.config import Config
 
 
 def main():
-    config = Config()
-    config.read(sys.argv[1])
+    config = Config(sys.argv[1])
 
     init_logging(config)
 

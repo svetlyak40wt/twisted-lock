@@ -9,18 +9,11 @@ from twisted.internet import reactor
 from twisted.internet.task import deferLater
 from twisted.internet.defer import inlineCallbacks, gatherResults
 from twisted.web.http import EXPECTATION_FAILED, OK
-from StringIO import StringIO
 
-from ..lock import LockFactory, LockProtocol, Syncronizer, Logger
+from ..lock import LockFactory, LockProtocol, Syncronizer
 from ..config import Config
 from ..utils import wait_calls
 from .import TestCase as BaseTestCase, seed, get_body
-
-def cfg(text):
-    config = Config()
-    config.readfp(StringIO(text))
-    return config
-
 
 class TestCase(BaseTestCase):
     num_nodes = 3
@@ -29,21 +22,14 @@ class TestCase(BaseTestCase):
     def __init__(self, *args, **kwargs):
         self.client = Agent(reactor)
 
-        base_cfg = '''
-[cluster]
-nodes = %s
-first_connect_delay = 0
-[myself]
-listen = %s
-[web]
-listen = %s
-'''
-        nodes = ', '.join(
-            '127.0.0.1:%s' % (4001 + x)
-            for x in range(self.num_nodes)
-        )
+        nodes = [('127.0.0.1', 4001 + x) for x in range(self.num_nodes)]
+
         self.configs = [
-            cfg(base_cfg % (nodes, 4001 + x, 9001 + x))
+            Config(
+                NODES=nodes,
+                LOCK_PORT=4001 + x,
+                HTTP_PORT=9001 + x
+            )
             for x in range(self.num_nodes)
         ]
 

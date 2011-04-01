@@ -68,7 +68,7 @@ def init_logging(config):
     global _logging_initialized
     if not _logging_initialized:
         handler = logbook.FileHandler(
-            config.get('logging', 'filename') or 'twisted-lock.log',
+            config.LOG_FILENAME or 'twisted-lock.log',
             format_string='[{record.time}] {record.level_name:>5} {record.extra[node]} {record.module}:{record.lineno} {record.message}',
         )
         handler.push_application()

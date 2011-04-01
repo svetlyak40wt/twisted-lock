@@ -1,12 +1,12 @@
 import random
 import time
 
-from ConfigParser import ConfigParser
 from twisted.internet.base import DelayedCall
 from twisted.internet.defer import Deferred
 from twisted.internet.protocol import Protocol
 from twisted.trial import unittest
 from ..utils import init_logging
+from ..config import Config
 
 DelayedCall.debug = True
 
@@ -50,10 +50,5 @@ def get_body(response):
     return protocol.done
 
 
-logging_config = ConfigParser()
-logging_config.add_section('logging')
-logging_config.set('logging', 'filename', 'unittest.log')
-logging_config.add_section('myself')
-logging_config.set('myself', 'listen', '0')
-
+logging_config = Config(LOG_FILENAME='unittest.log')
 init_logging(logging_config)

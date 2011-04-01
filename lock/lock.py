@@ -163,9 +163,8 @@ class LockFactory(ClientFactory):
 
     def __init__(self, config):
         self.log = Logger('lockfactory')
-        interface, port = parse_ip(config.get('myself', 'listen', '4001'))
-        self.port = port
-        self.interface = interface
+        self.interface = config.LOCK_INTERFACE or '127.0.0.1'
+        self.port = config.LOCK_PORT or 4001
 
         def inject_node(rec):
             rec.extra['node'] = self.port
@@ -182,8 +181,8 @@ class LockFactory(ClientFactory):
             logger_group=self._logger_group,
         )
 
-        self.neighbours = parse_ips(config.get('cluster', 'nodes', '127.0.0.1:4001'))
-        self._first_connect_delay = float(config.get('cluster', 'first_connect_delay', 0))
+        self.neighbours = config.NODES
+        self._first_connect_delay = config.FIRST_CONNECT_DELAY or 0
 
         self.master = None
         self._stale = False
@@ -228,11 +227,13 @@ class LockFactory(ClientFactory):
         self.add_callback('^sync_snapshot .*$', self.syncronizer.on_sync_snapshot)
 
         self.log.debug('Opening the port %s:%s' % (self.interface, self.port))
-        self._port_listener = reactor.listenTCP(self.port, self, interface = self.interface)
+        self._port_listener = reactor.listenTCP(self.port, self, interface=self.interface)
 
         self.web_server = server.Site(Root(self))
 
-        self.http_interface, self.http_port = parse_ip(config.get('web', 'listen', '9001'))
+        self.http_interface = config.HTTP_INTERFACE or '127.0.0.1'
+        self.http_port = config.HTTP_PORT or 9001
+
         self._webport_listener = reactor.listenTCP(
             self.http_port,
             self.web_server,
