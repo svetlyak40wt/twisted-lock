@@ -25,18 +25,18 @@ Now you can:
 
 * lock:
 
-    curl -X POST -q http://127.0.0.1:9001/blah
+        curl -X POST -q http://127.0.0.1:9001/blah
 
 * unlock
 
-    curl -X POST -q http://127.0.0.1:9001/blah
+        curl -X POST -q http://127.0.0.1:9001/blah
 
 * get server info:
 
-    # status
-    curl -q http://127.0.0.1:9001/info/status
-    # or keys
-    curl -q http://127.0.0.1:9001/info/keys
+        # status
+        curl -q http://127.0.0.1:9001/info/status
+        # or keys
+        curl -q http://127.0.0.1:9001/info/keys
 
 
 How to run tests
@@ -54,6 +54,6 @@ is no errors.
 Credits
 -------
 
-Alexander Artemenko <svetlyak.40wt@gmail.com>
+Alexander Artemenko (<svetlyak.40wt@gmail.com>) — initial author.
 
 Feel free to fork the project and send me pull requests.
