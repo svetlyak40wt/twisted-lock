@@ -1,0 +1,5 @@
+Logbook==0.3
+Twisted==11.0.0
+mock==0.7.2
+wsgiref==0.1.2
+zope.interface==3.6.3

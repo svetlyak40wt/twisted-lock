@@ -7,3 +7,4 @@ env
 ctags
 .be/id-cache
 doc/_build
+virtualenv.py
