@@ -2,7 +2,7 @@
 
 MAX_TRIES=${2:-100}
 LOG_FILENAME=unittest.log
-TEST_NAME=$1
+TEST_NAME=${1:-lock}
 
 function notify()
 {
