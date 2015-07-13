@@ -1,6 +1,8 @@
 Twisted lock
 ============
 
+[![Join the chat at https://gitter.im/svetlyak40wt/twisted-lock](https://badges.gitter.im/Join%20Chat.svg)](https://gitter.im/svetlyak40wt/twisted-lock?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge)
+
 Fault-tolerant distributed lock with REST interface. Internaly,
 it uses PAXOS protocol to reach consensus on propagated values.
 
